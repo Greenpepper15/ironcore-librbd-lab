@@ -195,17 +195,58 @@ keyslot operation (TODO 4).
 Deferred work and open questions. Numbers stay.
 
 1. **A real build from Clyso's build system.** Everything was run with the
-   upstream 21.2.0 image. Open: does its RPM repository carry `librbd-devel`
-   under `<url>/<arch>/` as the upstream one does, which signing key applies,
-   and how do people outside Clyso get pull access to image and repository.
+   upstream 21.2.0 image. Read in the Ceph recipe and in the source of the
+   build system, not run:
+   - The RPM repository has the layout the provider image expects,
+     `<repository>/<arch>/`
+     ([`build_rpms.sh:149`](https://github.com/clyso/cbs-components/blob/a55965a871f1167192e5f377c86e5f6dea741589/components/ceph/scripts/rpm/build_rpms.sh#L149)).
+     The repository of a build ends in
+     `ceph/rpm-<version>/el10-<arch>.clyso`, so `CEPH_REPO_URL` differs
+     between architectures.
+   - The repository file that a build ships turns the signature check on
+     ([`build_rpms.sh:87`](https://github.com/clyso/cbs-components/blob/a55965a871f1167192e5f377c86e5f6dea741589/components/ceph/scripts/rpm/build_rpms.sh#L87)).
+     Packages are signed when the build system has a signing key configured.
+     The image recipe reads the public key from `keys/release.asc` below the
+     base URL of the artifacts, not below the repository
+     ([`image.yaml:33`](https://github.com/clyso/cbs-components/blob/a55965a871f1167192e5f377c86e5f6dea741589/components/ceph/images/v21/image.yaml#L33)).
+     Its URL goes into `CEPH_REPO_GPGKEY`.
+
+   Access to the image and the repository comes with the build, from the
+   person who provides it. Open until the first real build are the public
+   URL and whether the repository needs a login. If it does, the image build
+   needs a way to pass it.
 2. **Manifests from a local checkout.** Only images are replaced. For
    libvirt-provider the `LIBVIRT_PROVIDER_CONFIG_DIR` of ironcore-in-a-box
    could be passed through. The other components need the same.
-3. **Architectures.** Apple silicon laptops need an aarch64 build of Ceph,
-   other laptops x86_64. Open whether both are built.
+3. **Architectures.** The provider container runs on the CPU of the laptop.
+   Apple silicon laptops need an aarch64 build of Ceph, other laptops x86_64.
+   Read in the source of the build system, not run. It builds natively, so
+   an aarch64 build needs an aarch64 build machine, and the Ceph recipe sets
+   no limit on the architecture. Open whether such a machine is available.
+   When both are built, each architecture needs its own image tag, because
+   the tag carries no architecture and a build is skipped when its tag
+   exists. The repository URL differs as well (TODO 1). Without an aarch64
+   build see TODO 5.
 4. **Memory during a keyslot operation.** Measure the provider while it adds
    a keyslot, then set the default limit from that.
 5. **macOS and Windows.** Run the quick start on Docker Desktop and on WSL2.
+   If a build exists for x86_64 only, a Mac with Apple silicon has three
+   routes, none of them tried:
+   - A whole x86_64 Linux VM under QEMU, for example with
+     [Lima](https://lima-vm.io/docs/config/multi-arch/). The lab should run
+     unchanged in it and very slowly, since the VM of the example is then
+     emulated twice.
+   - An arm64 Linux VM in which only the provider pod runs through QEMU
+     user-mode emulation.
+   - The same with Rosetta. el10 binaries need the x86-64-v3 CPU level and
+     Rosetta is reported to stop at v2 (`Fatal glibc error: CPU does not
+     support x86-64-v3`,
+     [RHEL-33471](https://issues.redhat.com/browse/RHEL-33471), read
+     2026-11-22), so this route is expected to fail for a build on el10.
+
+   The last two also need the lab to build or pull the provider image for
+   another architecture and to load it into the kind node. Neither is
+   prepared.
 6. **go-ceph bindings for new librbd calls.** A prototype that adds C calls
    needs them in Go. Open whether through a go-ceph fork named in the
    provider's `go.mod` or a small cgo file in the provider.
@@ -218,3 +259,7 @@ Deferred work and open questions. Numbers stay.
 9. **Upstream.** Propose the loop device fix and the start-up order fix to
    ironcore-in-a-box, and ask whether overrides for all components would be
    welcome there.
+10. **QEMU's old librbd against a rewritten header.** Decision 3 relies on
+    two things that were not run. The I/O of a running VM continues while
+    the provider rewrites the LUKS header, and at the next attach QEMU's
+    librbd 18.2.7 unlocks the header with the new passphrase.
