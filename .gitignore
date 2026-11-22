@@ -1,0 +1,6 @@
+# local settings and state of a lab run
+lab.env
+.lab/
+.cache/
+.kube/
+logs/

@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Entry point of the lab. Runs the lab Makefile inside the toolbox container,
+# so the host needs Docker and bash only.
+#
+#   ./lab <make target> [VAR=value ...]   e.g. ./lab up
+#   ./lab kubectl <args>                  kubectl against the lab cluster
+#   ./lab rbd <args>                      rbd of the build under test, in the provider pod
+#   ./lab shell                           a shell in the toolbox
+set -euo pipefail
+
+LAB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+TOOLBOX_IMAGE=${TOOLBOX_IMAGE:-ironcore-librbd-lab-toolbox:local}
+DOCKER_SOCK=${DOCKER_SOCK:-/var/run/docker.sock}
+
+if [ -f "$LAB_DIR/lab.env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . "$LAB_DIR/lab.env"
+    set +a
+fi
+
+# Rebuild the toolbox when its Dockerfile changed.
+want=$(cksum < "$LAB_DIR/toolbox/Dockerfile" | cut -d' ' -f1)
+have=$(docker image inspect -f '{{ index .Config.Labels "lab.dockerfile" }}' "$TOOLBOX_IMAGE" 2>/dev/null || true)
+if [ "$want" != "$have" ]; then
+    docker build -q --label "lab.dockerfile=$want" -t "$TOOLBOX_IMAGE" "$LAB_DIR/toolbox" >/dev/null
+fi
+
+mkdir -p "$LAB_DIR/.cache/home" "$LAB_DIR/.kube"
+
+args=(--rm -i
+    -v "$LAB_DIR:/lab" -w /lab
+    -v "$DOCKER_SOCK:/var/run/docker.sock"
+    -e HOME=/lab/.cache/home
+    -e GOCACHE=/lab/.cache/go-build
+    -e GOMODCACHE=/lab/.cache/go-mod
+    -e KUBECONFIG=/lab/.kube/config)
+[ -t 0 ] && [ -t 1 ] && args+=(-t)
+
+# On Linux the files in the lab directory should stay owned by the caller.
+# Docker Desktop maps ownership itself and its socket needs root.
+if [ "$(uname -s)" = Linux ] && [ "$(id -u)" != 0 ]; then
+    args+=(--user "$(id -u):$(id -g)" --group-add "$(stat -c %g "$DOCKER_SOCK")")
+fi
+
+# The API server is reached over the kind network, by the node's name. This
+# works the same on Linux and on Docker Desktop. Before the first cluster
+# exists the network is missing; the Makefile joins it after creating it.
+if docker network inspect kind >/dev/null 2>&1; then
+    args+=(--network kind)
+fi
+
+# Local checkouts named in lab.env are mounted at the same path.
+for dir in "${CEPH_PROVIDER_DIR:-}" "${LIBVIRT_PROVIDER_DIR:-}" "${IRONCORE_DIR:-}"; do
+    [ -n "$dir" ] && args+=(-v "$dir:$dir")
+done
+
+# Pass the lab settings through.
+for var in $(compgen -v | grep -E '^(CEPH_|LIBVIRT_PROVIDER_|IRONCORE_|VOLUMEPOOLLET_|MACHINEPOOLLET_|LAB_|KIND_CLUSTER_NAME)' || true); do
+    args+=(-e "$var")
+done
+
+case "${1:-help}" in
+    kubectl) shift; exec docker run "${args[@]}" "$TOOLBOX_IMAGE" /lab/ironcore-in-a-box/bin/kubectl "$@" ;;
+    rbd)     shift; exec docker run "${args[@]}" "$TOOLBOX_IMAGE" hack/rbd.sh "$@" ;;
+    shell)   exec docker run "${args[@]}" "$TOOLBOX_IMAGE" bash ;;
+    *)       exec docker run "${args[@]}" "$TOOLBOX_IMAGE" make --no-print-directory "$@" ;;
+esac
