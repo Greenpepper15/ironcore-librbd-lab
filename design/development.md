@@ -46,6 +46,33 @@ kind or kubectl on the host.
 | `./lab down` | cluster gone, loop device released |
 | `./lab down`, then `./lab up` and the example, from nothing | down 35 s, up 7 min 32 s with all images already pulled, lab-built provider deployed by `up` itself. Machine `Running` with the encrypted volume `Attached` 3 min 30 s after the apply |
 
+### Header rewrite check
+
+A stand-in for the rotation (TODO 10 and 11 of `design-decisions.md`), run on
+a second encrypted Volume that was attached to the running VM. In the
+provider pod (librbd 21.2.0, cryptsetup 2.8.1) the first 16 MiB of the image
+were copied into a file with python3-rbd, `cryptsetup` changed the copy, and
+the 4 KiB blocks that differed were written back to the image. The I/O of the
+VM was sent through the QEMU monitor with `qemu-io -d` on the device of the
+disk, which is the path guest I/O takes. The guest itself did not use the
+disk. On the VM side were QEMU 10.0.13, librbd 18.2.7 and libcryptsetup
+2.7.5. Monitor commands leave the domain marked as tainted in libvirt until
+the VM restarts.
+
+| Check | Result |
+|---|---|
+| Header of a volume formatted by the provider | LUKS2, data at 16 MiB, the image is the volume size plus 16 MiB. One keyslot, argon2id with 64 MiB, time cost 4, 4 threads |
+| Unlock with the Secret value as text, then with its decoded bytes | the text unlocks, the decoded bytes are refused |
+| `cryptsetup luksAddKey` on the copy | 18.5 s, peak of the child 71 MiB, memory of the pod from 226 to 292 MiB, no OOM event at 2Gi |
+| Write-back of the new keyslot under an I/O loop on the VM's disk | 67 blocks in 3 runs (both copies of the header, the keyslot area) in 0.86 s. 85 rounds of write, flush and read without error. Two writes took 0.61 s and 0.45 s, the mean was 0.13 s |
+| Exclusive lock around a write-back | afterwards the image has no lock owner, QEMU takes the lock again at its next write |
+| Volume removed from the Machine and added again, old passphrase | gone from the VM after 16 s, `Attached` again after 4 s, earlier data readable |
+| `cryptsetup luksKillSlot` for the old keyslot, write-back while attached | 3.6 s, memory of the pod +66 MiB, write-back 0.27 s, I/O continues |
+| Secret changed to the new passphrase | a Machine reconcile 3 s later sent detach and attach. The disk was gone from the VM for 52 s, until the next resync of libvirt-provider, and came back with the new passphrase. Earlier data readable |
+| Second change of the Secret, an added key | no Machine reconcile within 14 minutes |
+| Fresh open from the kind node with each passphrase | the old one fails with `encryption load fail: Operation not permitted`, the new one reads the data |
+| Clean-up | test Volume, Secret and image removed, the example volume still `Attached` |
+
 ## Assumed, not run
 
 - A build from Clyso's build system behaves like the upstream el10 image. The
@@ -55,5 +82,6 @@ kind or kubectl on the host.
   should not depend on the host. The uid handling in `lab` differs there.
 - x86_64.
 - Replacing the other five images. Same code path as the provider.
-- The rotation itself. No build with rotation was at hand, so nothing here
-  says how QEMU's librbd 18.2.7 behaves while the provider rewrites the header.
+- The rotation itself. No build with rotation was at hand. The header rewrite
+  check stands in for it with `cryptsetup` on a copy of the header, and its
+  I/O did not come from a guest with a mounted filesystem.

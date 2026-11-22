@@ -75,8 +75,8 @@ the build under test as well?
 
 **Why not.** The rotation variants under test change what the provider does
 to the LUKS header. QEMU only has to keep the image open while that happens,
-which an unchanged librbd is expected to do (not run in this lab yet, no
-build with rotation was at hand). An IronCore hypervisor in production also
+which an unchanged librbd did in a check with a stand-in for the rotation
+(see Implementation). An IronCore hypervisor in production also
 runs the librbd of its own distribution, not the one of the provider image,
 so two different versions on the two sides is the realistic case. And the
 build comes as el10 RPMs while a kind node has to be the Debian based
@@ -96,7 +96,10 @@ and libvirt.
 
 **Implementation.** Nothing to build. `hack/status.sh` prints both versions.
 Checked: a volume formatted by librbd 21.2.0 in the provider was hot-attached
-to a running VM whose QEMU uses librbd 18.2.7.
+to a running VM whose QEMU uses librbd 18.2.7. Checked with a stand-in for
+the rotation (TODO 10): the I/O of the VM went on while a keyslot was added
+to the header and another one removed from inside the provider pod, and the
+next attach through QEMU's librbd unlocked the rewritten header.
 
 ## 4. The Ceph cluster stays on the version ironcore-in-a-box pins
 
@@ -187,8 +190,8 @@ call.
 **Implementation.** `hack/apply-overrides.sh` sets the limit of the
 `ceph-volume-provider` container to `CEPH_VOLUME_PROVIDER_MEMORY` (default
 2Gi). `Makefile` waits for the CephBlockPool, then restarts the Deployment.
-The default is a guess with headroom. It has not been measured against a
-keyslot operation (TODO 4).
+The default is a guess with headroom. A keyslot operation was measured with
+a stand-in only (TODO 4).
 
 ## TODO
 
@@ -228,7 +231,25 @@ Deferred work and open questions. Numbers stay.
    exists. The repository URL differs as well (TODO 1). Without an aarch64
    build see TODO 5.
 4. **Memory during a keyslot operation.** Measure the provider while it adds
-   a keyslot, then set the default limit from that.
+   a keyslot, then set the default limit from that. Measured so far with a
+   stand-in, `cryptsetup luksAddKey` as a child process in the provider pod
+   (`development.md`, "Header rewrite check"). The memory of the pod rose by
+   66 MiB, to 292 MiB at a limit of 2Gi, and the call took 18.5 s at the
+   pod's CPU limit of 200m.
+
+   The 66 MiB follow from the keyslot, which uses argon2id with 64 MiB.
+   librbd leaves the choice to libcryptsetup outside its test mode
+   ([`Header.cc:155`](https://github.com/ceph/ceph/blob/b060042deb05d33e6cc358970cfb8221240bcf3e/src/librbd/crypto/luks/Header.cc#L155)),
+   and libcryptsetup measures the CPU when the keyslot is created. 64 MiB is
+   the lowest result of that measurement
+   ([`pbkdf_check.c:47`](https://gitlab.com/cryptsetup/cryptsetup/-/blob/9cfdd6ba068b375a2b6cda429b3f92388448dd67/lib/crypto_backend/pbkdf_check.c#L47)),
+   the highest is 1 GiB by default
+   ([`meson_options.txt:20`](https://gitlab.com/cryptsetup/cryptsetup/-/blob/9cfdd6ba068b375a2b6cda429b3f92388448dd67/meson_options.txt#L20)).
+   A provider with more CPU is therefore expected to create keyslots that
+   need more memory to open, not run.
+
+   Open: the same with the provider process calling librbd itself, with a
+   higher CPU limit, and at the 256Mi of ironcore-in-a-box.
 5. **macOS and Windows.** Run the quick start on Docker Desktop and on WSL2.
    If a build exists for x86_64 only, a Mac with Apple silicon has three
    routes, none of them tried:
@@ -260,6 +281,53 @@ Deferred work and open questions. Numbers stay.
    ironcore-in-a-box, and ask whether overrides for all components would be
    welcome there.
 10. **QEMU's old librbd against a rewritten header.** Decision 3 relies on
-    two things that were not run. The I/O of a running VM continues while
-    the provider rewrites the LUKS header, and at the next attach QEMU's
-    librbd 18.2.7 unlocks the header with the new passphrase.
+    two things. The I/O of a running VM continues while the provider
+    rewrites the LUKS header, and at the next attach QEMU's librbd 18.2.7
+    unlocks the header with the new passphrase. Both held in a check with a
+    stand-in for the rotation (`development.md`, "Header rewrite check").
+    The stand-in was `cryptsetup` 2.8.1 on a copy of the header in the
+    provider pod, with the changed blocks written to the image through
+    librbd 21.2.0. The other side was QEMU 10.0.13 with librbd 18.2.7 and
+    libcryptsetup 2.7.5.
+    - Writing the header takes the exclusive lock of the image away from
+      QEMU. QEMU takes it back at its next write. Two writes of the VM
+      waited about half a second for that.
+    - A header in which the newer libcryptsetup had added one keyslot and
+      removed another was unlocked by the older one with the new
+      passphrase. The old passphrase was refused.
+
+    Open: the same with a build whose librbd does the rotation itself, and
+    with a guest that writes to a mounted filesystem. The I/O of the check
+    was sent through the QEMU monitor.
+11. **The new passphrase on the VM side.** QEMU's librbd gets the passphrase
+    at every attach, from the Secret that the Volume names. After a rotation
+    that Secret has to hold the new one. Seen in the header rewrite check,
+    with ironcore v0.6.1 and libvirt-provider v0.5.0:
+    - The passphrase is the value of `encryptionKey` as it is. If the value
+      is base64 text, the text is the passphrase and the decoded bytes are
+      refused.
+    - machinepoollet compares the whole data of the Secret with what the
+      machine runtime holds
+      ([`machine_controller_volume.go:202`](https://github.com/ironcore-dev/ironcore/blob/ee24604077faa679d6e22b06c543ca0a578b5db7/poollet/machinepoollet/controllers/machine_controller_volume.go#L202),
+      [`:318`](https://github.com/ironcore-dev/ironcore/blob/ee24604077faa679d6e22b06c543ca0a578b5db7/poollet/machinepoollet/controllers/machine_controller_volume.go#L318)).
+      On a difference it detaches the volume and attaches it again
+      ([`:340`](https://github.com/ironcore-dev/ironcore/blob/ee24604077faa679d6e22b06c543ca0a578b5db7/poollet/machinepoollet/controllers/machine_controller_volume.go#L340)),
+      and the disk leaves the running VM. In the check it was gone for 52 s,
+      until libvirt-provider's next resync, which runs once a minute. The
+      guest did not use the disk.
+    - A change of the Secret does not start this. The Secret watch of
+      machinepoollet covers the ignition Secret only
+      ([`util.go:68`](https://github.com/ironcore-dev/ironcore/blob/ee24604077faa679d6e22b06c543ca0a578b5db7/api/compute/v1alpha1/util.go#L68)),
+      and a second change was not picked up within 14 minutes. It happens at
+      the next reconcile of the Machine. In the check one came 3 s after the
+      first change, and what started it was not found.
+    - An attach with a passphrase whose keyslot is gone fails (`encryption
+      load fail`). So the old keyslot may only go when nothing attaches with
+      the old passphrase any more.
+
+    Open: the order of the steps of a rotation (new keyslot, Secret, old
+    keyslot) and what tells the provider that every VM has moved on. Also
+    whether the disk has to leave the VM at all. QEMU keeps working with the
+    volume key it has, and machinepoollet carries a note for an update in
+    place
+    ([`:372`](https://github.com/ironcore-dev/ironcore/blob/ee24604077faa679d6e22b06c543ca0a578b5db7/poollet/machinepoollet/controllers/machine_controller_volume.go#L372)).
