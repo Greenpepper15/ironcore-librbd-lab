@@ -326,6 +326,51 @@ again. 80 s of that were the pull of the Rook image. The Ceph image of the
 cluster then took 1.3 s, because the Rook image is built on it. Not run:
 `./lab up` from nothing with the longer wait on the Linux host.
 
+## 11. The ceph-provider source is a submodule, pinned to the commit the lab was run with
+
+**Problem.** The lab builds the volume provider from source, and
+`CEPH_PROVIDER_DIR` had to name a checkout that everyone made by themselves.
+Nothing recorded which commit of ceph-provider belongs to a state of the
+lab, and a changed provider had no place to be fetched from.
+
+Example. All runs up to 2026-11-23 used commit `4c61421` of ceph-provider,
+three commits after v0.7.0. A clone of upstream on that day gave `34f0942`,
+a provider that the lab had never run.
+
+**Why.** A submodule pins the provider source per commit of the lab, the
+way decision 1 pins ironcore-in-a-box, and the one clone of the quick start
+brings everything a build needs. The submodule points at a fork of
+ceph-provider, so a prototype is a branch there and a new pin here.
+`CEPH_PROVIDER_DIR` stays and wins when it is set, for work in a checkout
+of one's own.
+
+**Alternatives that lost.**
+- A line in the README that names the commit to clone. Nothing checks it,
+  and it is one more step for every reader.
+- The provider source copied into the lab. A change could then not go back
+  to ceph-provider as a commit.
+
+**What we accept.** A change to the provider takes two pushes, one to the
+fork and one for the new pin. The fork is public, so text in its commits
+follows the rules for upstream text. The manifests still come from the
+version that ironcore-in-a-box names, v0.6.0, while the source is 16
+commits newer (TODO 2).
+
+**Implementation.** Submodule `ceph-provider`, its URL is in `.gitmodules`,
+pinned at `4c61421`. `hack/build-ceph-volume-provider.sh` builds from it
+when `CEPH_PROVIDER_DIR` is empty, and says how to fetch it when the
+directory is empty.
+
+Checked on 2026-11-23 on the Linux test host. The tree of the submodule at
+`4c61421` equals the tree of the checkout that all earlier runs used. With
+`CEPH_PROVIDER_DIR` unset, `./lab build-ceph-volume-provider` printed
+`ceph-provider source: /lab/ceph-provider` and built in 11 s from the build
+cache. The provider binary in that image has the same SHA-256 and size as
+the one in the image that the lab runs with the second build under test.
+With an empty directory as source the script stops with the hint to fetch
+the submodule. Not run: a clone from nothing with `--recurse-submodules`,
+and a host that has a directory `ceph-provider` in the clone already.
+
 ## TODO
 
 Deferred work and open questions. Numbers stay.

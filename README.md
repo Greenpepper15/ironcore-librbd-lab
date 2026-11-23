@@ -108,9 +108,12 @@ Set in `lab.env`:
 CEPH_IMAGE=<container image of the build>
 CEPH_REPO_URL=<RPM repository of the same build>
 CEPH_REPO_GPGKEY=<its signing key, or empty>
-CEPH_PROVIDER_DIR=/path/to/ceph-provider        # your checkout
 CEPH_VOLUME_PROVIDER_IMAGE=lab/ceph-volume-provider:dev
 ```
+
+The provider is built from the submodule `ceph-provider`, which the lab pins
+to the commit it was run with. To build from a checkout of your own, add
+`CEPH_PROVIDER_DIR=/path/to/ceph-provider`.
 
 If the image needs a login, run `docker login` and `docker pull` for it on
 the host first. The build then uses the local copy.
@@ -128,8 +131,8 @@ Then:
 under test can be tried this way against an image that a VM has open, before
 any Go code exists.
 
-After a change in the checkout, repeat `build-ceph-volume-provider` and
-`deploy`. The VM keeps running while the provider is replaced.
+After a change in the provider source, repeat `build-ceph-volume-provider`
+and `deploy`. The VM keeps running while the provider is replaced.
 
 ### A build for another architecture than the host
 
@@ -199,7 +202,7 @@ flags) is not covered yet, see TODO in `design/design-decisions.md`.
 | `./lab up` | cluster, IronCore, networking, libvirt-provider, Rook Ceph, volume provider |
 | `./lab up-ironcore` | the same without storage |
 | `./lab up-storage` | Rook Ceph and the volume provider |
-| `./lab build-ceph-volume-provider` | provider image from `CEPH_PROVIDER_DIR` against `CEPH_IMAGE` |
+| `./lab build-ceph-volume-provider` | provider image from the `ceph-provider` submodule, or `CEPH_PROVIDER_DIR`, against `CEPH_IMAGE` |
 | `./lab deploy` | roll out the images named in `lab.env` |
 | `./lab status` | librbd versions and deployed images |
 | `./lab kubectl ...` | kubectl against the lab cluster |
@@ -220,6 +223,7 @@ images/              Dockerfile of the provider built against a Ceph image
 hack/                scripts behind the targets
 examples/            a VM with an encrypted data volume
 ironcore-in-a-box/   submodule, pinned
+ceph-provider/       submodule, pinned, source of the provider image
 design/              why the lab is built this way, what was checked
 ```
 

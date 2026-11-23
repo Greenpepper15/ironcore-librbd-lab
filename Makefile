@@ -64,7 +64,7 @@ down: ## Delete the cluster and release the loop device
 ##@ Changing a component
 
 .PHONY: build-ceph-volume-provider
-build-ceph-volume-provider: ## Build the volume provider from CEPH_PROVIDER_DIR against CEPH_IMAGE
+build-ceph-volume-provider: ## Build the volume provider from the ceph-provider submodule against CEPH_IMAGE
 	hack/build-ceph-volume-provider.sh
 
 .PHONY: deploy

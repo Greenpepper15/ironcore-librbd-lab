@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
-# Builds the ceph-volume-provider from a local checkout against the librbd of
+# Builds the ceph-volume-provider from source against the librbd of
 # CEPH_IMAGE. Settings come from lab.env (see lab.env.example).
 set -euo pipefail
 
 LAB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
-: "${CEPH_PROVIDER_DIR:?set CEPH_PROVIDER_DIR to a ceph-provider checkout}"
+# The source is the pinned submodule unless lab.env names another checkout
+# (design decision 11).
+CEPH_PROVIDER_DIR=${CEPH_PROVIDER_DIR:-$LAB_DIR/ceph-provider}
+if [ ! -f "$CEPH_PROVIDER_DIR/go.mod" ]; then
+    echo "no ceph-provider source in $CEPH_PROVIDER_DIR. For the submodule run on the host:" >&2
+    echo "  git submodule update --init ceph-provider" >&2
+    exit 1
+fi
+echo "ceph-provider source: $CEPH_PROVIDER_DIR"
 : "${CEPH_IMAGE:?set CEPH_IMAGE to the Ceph container image to build against}"
 : "${CEPH_REPO_URL:?set CEPH_REPO_URL to the RPM repository of the same Ceph build}"
 image=${CEPH_VOLUME_PROVIDER_IMAGE:?set CEPH_VOLUME_PROVIDER_IMAGE to the tag to build, e.g. lab/ceph-volume-provider:dev}

@@ -1,3 +1,6 @@
 [submodule "ironcore-in-a-box"]
 	path = ironcore-in-a-box
 	url = https://github.com/ironcore-dev/ironcore-in-a-box.git
+[submodule "ceph-provider"]
+	path = ceph-provider
+	url = https://github.com/Greenpepper15/ceph-provider.git
