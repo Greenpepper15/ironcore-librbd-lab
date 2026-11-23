@@ -606,14 +606,26 @@ Deferred work and open questions. Numbers stay.
     `encryption_format` on a handle that writes at the same time, so the
     cause is not specific to this build.
 
-    Until a build changes this, run the header commands of this build only
-    while the VM does not write, call them through a caller that takes the
-    transient lock, or expect to kill them. After the kill
+    With that first build, run the header commands only while the VM does
+    not write, call them through a caller that takes the transient lock, or
+    expect to kill them. After the kill
     QEMU needed just under 30 s to take the lock, then the VM's I/O went on.
 
-    Open: a build with a fix, the same check with the provider calling
-    librbd, and whether the order of the writes should put the keyslot area
-    before the metadata, so that a stop in between leaves the old header.
+    Run on 2026-11-23 with a second build, `22.0.0-146-g2fd833e9b5ec`
+    ("Build with the fix for the hang" in `development.md`). It no longer
+    marks the reads and writes of the header as in flight when it creates
+    them, and its `rbd` holds the transient lock around the write-back of
+    `luksAddKey`, `luksChangeKey` and `luksKillSlot`. 30 of 30 header
+    commands returned while the VM wrote, five commands in six cycles. In
+    a control right before, the first build hung in 2 of 3 runs of
+    `luksAddKey`. 18 of the 30 were `keyslot add`, `keyslot remove` and
+    `header restore`, which take no lock of their own, so the change in
+    librbd is enough for them. The other 12 had QEMU's librbd 18.2.7 wait
+    for the transient lock, which closes the "not tested" above.
+
+    Open: the same check with the provider calling librbd, and whether the
+    order of the writes should put the keyslot area before the metadata, so
+    that a stop in between leaves the old header.
 
 14. **A fixed keyslot cost when a Volume is created.** Deferred on
     2026-11-23. The format call of librbd takes no cost

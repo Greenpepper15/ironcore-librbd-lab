@@ -8,7 +8,8 @@
 - [x] 4. Encrypted volume on a running VM, with the upstream provider and with the lab-built one
 - [x] 5. First run with a build from Clyso's build system, x86_64 under
       emulation ("Build with rotation commands" below, TODO 1, 3 and 13 of
-      `design-decisions.md`)
+      `design-decisions.md`). A second build no longer hangs in a header
+      command while the VM writes ("Build with the fix for the hang")
 - [ ] **6. Quick start on macOS and on Windows with WSL2** (TODO 5). Run on
       a Mac with the upstream provider image and with the first build under
       test, x86_64 through Rosetta ("macOS" below). Open: WSL2
@@ -25,6 +26,7 @@
 | Ceph image recipes of Clyso's build system | [cbs-components](https://github.com/clyso/cbs-components) |
 | Stand-in for the build under test | `quay.io/ceph/ceph:v21.2.0`, RPMs at `https://download.ceph.com/rpm-21.2.0/el10` |
 | First build under test | Ceph `22.0.0-143-g9cce574d9dc7` from Clyso's build system, x86_64, el10. Image and RPM repository come with the build |
+| Second build under test | Ceph `22.0.0-146-g2fd833e9b5ec`, the first one plus three commits against the hang of TODO 13 |
 | State of a run | `.lab/` (rendered overlays, OSD device), `.kube/`, `.cache/`, all ignored by git |
 
 ## What was run
@@ -214,6 +216,65 @@ writes.
 
 The check needs a Ceph build tree and a test cluster, so its scripts are
 not part of the lab.
+
+### Build with the fix for the hang
+
+Run 2026-11-23 on the same arm64 host, with a second build from Clyso's
+build system: Ceph `22.0.0-146-g2fd833e9b5ec` for x86_64, three commits on
+top of the first build. Two of them change how librbd creates the reads and
+the writes of the header, as described under "Cause of the hang". The third
+makes `rbd encryption luksAddKey`, `luksChangeKey` and `luksKillSlot` hold
+the exclusive lock in transient mode while they write the header back. The
+setup was the one of "Build with rotation commands": the provider emulated
+at a CPU limit of 2, `rbd` in the provider pod, the same Volume attached to
+the same VM, and the same rounds of write, flush and read through the QEMU
+monitor. All timings are emulated.
+
+Bring-up.
+
+| Check | Result |
+|---|---|
+| `docker pull --platform linux/amd64` on the host | 2 min 16 s. The image has `librbd1-22.0.0-146.g2fd833e9b5ec.el10.clyso.x86_64` and cryptsetup 2.8.6 |
+| `./lab build-ceph-volume-provider` | 4 min 0 s |
+| `./lab deploy` | 3 min 17 s. `rbd --version` in the new pod names the second build |
+
+A control with the first build, in the quarter of an hour before the switch.
+
+| Check | Result |
+|---|---|
+| `luksAddKey` while the VM wrote, three runs with a kill after 45 s | two hung. The VM's write waited 65 s in each, and the header listed a keyslot whose passphrase was refused. The third returned in 7.6 s. `header restore` with the VM idle repaired the header each time |
+
+Then the second build. A cycle is five commands, each one started while the
+VM wrote: `luksAddKey` for a second passphrase, `keyslot add` for a third,
+`keyslot remove` of the third, `luksKillSlot` of the second, and `header
+restore` with the dump from before the cycle. Six cycles were run, so 30
+commands, each with a kill after 120 s that was never needed.
+
+| Command | Runs | Returned | Time | Slowest write of the VM |
+|---|---|---|---|---|
+| `luksAddKey` | 6 | 6 | 7.7 to 9.2 s | 1.12 s |
+| `keyslot add` | 6 | 6 | 5.3 to 7.0 s | 1.33 s |
+| `keyslot remove` | 6 | 6 | 3.3 to 4.0 s | 0.44 s |
+| `luksKillSlot` | 6 | 6 | 5.5 to 6.1 s | 0.45 s |
+| `header restore` | 6 | 6 | 4.8 to 5.1 s | 0.68 s |
+
+No command hung. The VM saw no I/O error in 3606 rounds. Write and flush
+took 0.11 to 0.13 s on average in 28 of the 30 runs and up to 0.22 s in the
+other two, which are the two with a write above one second. One of those
+slow writes came before its command had started. In every cycle all three
+passphrases unlocked their keyslot after `keyslot add`, and after `header
+restore` only the first one did. At the end the two patterns that the VM
+had written before the first rotation read back, and QEMU held the lock.
+
+`keyslot add`, `keyslot remove` and `header restore` call librbd without a
+lock of their own, so these 18 runs rest on the change in librbd alone.
+`luksAddKey` and `luksKillSlot` add the transient lock. The client that had
+to wait in those 12 runs was QEMU's librbd 18.2.7, which had not been tried
+with that lock before.
+
+Not run with this build: the provider calling librbd itself (TODO 6),
+`luksChangeKey`, and a clone with `rbd_clone_copy_on_read`, the case that
+the change to the header reads is for.
 
 ### macOS
 
