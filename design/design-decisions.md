@@ -161,8 +161,10 @@ access to the Docker socket. The BuildKit plugin comes with the toolbox,
 because a host Docker may lack it (the test host did).
 
 **Implementation.** `toolbox/Dockerfile`, `lab`. On Linux the toolbox runs
-with the caller's uid so files stay owned by the caller. The macOS and WSL2
-paths of `lab` are written and not run.
+with the caller's uid so files stay owned by the caller. The macOS path ran
+on Docker Desktop: the toolbox runs as root there and the files it wrote
+into the clone belong to the user (`development.md`, "macOS"). The WSL2
+path is written and not run.
 
 ## 7. The OSD gets a free loop device, not `/dev/loop0`
 
@@ -193,6 +195,137 @@ call.
 The default is a guess with headroom. A keyslot operation was measured with
 a stand-in only (TODO 4).
 
+## 9. A build for another architecture runs through emulation, in the provider pod only
+
+**Problem.** The provider container runs on the CPU of the host. A Ceph build
+may exist for one architecture only (TODO 3), for example x86_64 while the
+laptop is an Apple silicon Mac or the host is an arm64 server.
+
+**Why.** Only the provider has to run the build under test (decisions 3 and
+4). With `CEPH_PLATFORM` the lab builds the provider image for the
+architecture of the Ceph build and loads it into the node, and the kernel of
+the host starts the programs of that image through QEMU's user-mode
+emulation. The cluster, IronCore and the VM stay native, and the Dockerfile
+and the manifests are the same in both cases.
+
+**Alternatives that lost.**
+- Wait for a build of the host's architecture. Still the answer for anything
+  that is measured, and it blocks every arm64 host until such a build exists.
+- A whole x86_64 Linux VM under QEMU, for example with
+  [Lima](https://lima-vm.io/docs/config/multi-arch/). The lab runs unchanged
+  in it, but the kind node, Ceph and the example VM are then all emulated,
+  the example VM twice.
+- Compile the provider natively with a cross compiler and emulate only when
+  it runs. A faster image build, paid for with a second toolchain and a copy
+  of the image's libraries to link against, kept in step with every build.
+- Rosetta on Apple silicon. el10 binaries need the x86-64-v3 CPU level and
+  Rosetta was reported to stop at v2 (`Fatal glibc error: CPU does not
+  support x86-64-v3`,
+  [RHEL-33471](https://issues.redhat.com/browse/RHEL-33471), read
+  2026-11-22), so it was expected to fail for a build on el10. A run on a
+  Mac showed the opposite, see the implementation note. Rosetta is
+  therefore not an alternative that lost. It is the emulator that Docker
+  Desktop uses on such a Mac unless its setting is turned off.
+
+**What we accept.**
+- The kernel of the host needs the emulation registered in `binfmt_misc`.
+  The lab does not do that by itself. On a plain Linux host it is one
+  privileged container run and lasts until the next reboot.
+- An emulated provider is slow, and its timings and memory figures say
+  nothing about a native one.
+- The emulation is one more thing that can fail under a Go program with
+  many threads that calls into librbd.
+
+**Implementation.** `CEPH_PLATFORM` in `lab.env`, for example `linux/amd64`.
+Empty means the architecture of the host and changes nothing.
+`hack/build-ceph-volume-provider.sh` passes it to `docker build`. Before
+that it starts one program of the Ceph image and stops with a hint when the
+emulation is missing. `hack/apply-overrides.sh` loads the provider image
+with `docker save --platform` and `kind load image-archive`, because `kind
+load docker-image` fails for an image of another platform in its `docker
+save` step (`unable to create manifests file: NotFound: content digest ...
+not found`, Docker 29.1.3 with the containerd image store).
+
+Checked on the arm64 host of `development.md` with the x86_64 variant of
+the upstream 21.2.0 image, QEMU 10.2.3 registered by `docker run
+--privileged --rm tonistiigi/binfmt --install amd64` ("Emulated provider"
+in `development.md`). The el10 userland starts there, so this QEMU offers
+the x86-64-v3 level.
+
+Checked on 2026-11-22 on Docker Desktop 4.76.0 on a Mac with Apple silicon
+(`development.md`, "macOS"), with the same x86_64 image and `docker run
+--platform linux/amd64` only. `rpm` and `rbd` of the el10 userland start
+there without a registration step. Docker Desktop has Rosetta and QEMU
+10.0.4 registered. Rosetta ran the programs and offers the x86-64-v3 level.
+
+Run there on 2026-11-23 with the first build from Clyso's build system, for
+x86_64. The image build took 3 min 43 s, and inside the cluster Rosetta
+starts the provider (`/run/rosetta/rosetta /ceph-volume-provider`). It
+created an encrypted Volume in 15 s and did not restart. Not run there: the
+same with the Rosetta setting turned off.
+
+With `CEPH_PLATFORM` set, `hack/apply-overrides.sh` also raises the CPU
+limit of the provider container, to `CEPH_VOLUME_PROVIDER_CPU` (default 2).
+At the 200m of ironcore-in-a-box an emulated provider with librbd 22 was
+throttled nearly all the time and the pod restarted in a loop. At 2 it was
+not throttled ("Build with rotation commands" in `development.md`). Without
+`CEPH_PLATFORM` the limit stays as ironcore-in-a-box sets it, unless
+`CEPH_VOLUME_PROVIDER_CPU` is set.
+
+The CPU limit has a side effect on the volumes. A provider with more CPU
+creates keyslots that need more memory to open, 732 MiB under Rosetta at a
+limit of 2 against 64 MiB at 200m (TODO 4).
+
+## 10. The lab waits 15 minutes for the address of the Ceph monitor, not 100 seconds
+
+**Problem.** The provider is deployed with the address of the Ceph monitor.
+ironcore-in-a-box reads it from a ConfigMap that Rook writes once the
+monitor runs. Its script asks 20 times, 5 s apart, and then gives up
+([`detect-ceph-mon-enpoints.sh:11`](https://github.com/ironcore-dev/ironcore-in-a-box/blob/8263adde111d43b0d7bd68d6e0701dcb530db2cd/hack/detect-ceph-mon-enpoints.sh#L11-L12)).
+In those 100 s the kind node has to pull the Rook image and the Ceph image,
+and Rook has to find the Ceph version and start the monitor. The node is new
+with every cluster, so it pulls these images at every `./lab up`.
+
+Example. The first `./lab up` on a Mac stopped after 9 min 24 s with `Error:
+timed out waiting for ceph mon endpoints`. The Ceph cluster was ready 90 s
+later, and a second `./lab up-storage` passed in 59 s. On the Linux test
+host the same wait took 55 and 60 s of the 100.
+
+**Why.** The script takes the number of tries from the environment
+(`MAX_RETRIES`), so the lab sets it where it calls the script, and the
+submodule stays as it is. 15 minutes is the limit that the next step of
+`up-storage`, the wait for the pool, already has.
+
+**Alternatives that lost.**
+- Tell the reader to run `./lab up-storage` a second time. It works, and a
+  quick start whose first command fails loses the reader.
+- Wait for the CephCluster to be `Ready` with `kubectl wait` before the
+  script runs. That is a second wait in front of the first, and it also
+  waits for the OSD, which the script does not need.
+- Pull the two images on the host and load them into the node. The wait
+  would no longer depend on the link after the first run. It needs a list
+  of image names that has to follow the submodule, and loading a large
+  image into the node takes minutes as well, two and a half for the
+  provider image (decision 2).
+
+**What we accept.** A storage setup that is really broken reports that after
+15 minutes instead of 100 s, with one line every 5 s until then.
+
+**Implementation.** `Makefile`, target `up-storage`, calls the script with
+`MAX_RETRIES=180`. Checked on the Linux test host: the script honours the
+variable. A copy of it with a `kubectl` that always fails gave up after 3
+tries with `MAX_RETRIES=3`. The changed line, run in the toolbox against
+the running cluster, found the address at the first try. That the node
+pulls the images at every cluster creation was read from the containerd log
+of the node.
+
+Run on 2026-11-23 on the Mac (`development.md`, "macOS"). `./lab up` from
+nothing passed in one go. The script printed 20 waits and found the address
+at the 21st try, 102 s after the first, so the 100 s would have failed
+again. 80 s of that were the pull of the Rook image. The Ceph image of the
+cluster then took 1.3 s, because the Rook image is built on it. Not run:
+`./lab up` from nothing with the longer wait on the Linux host.
+
 ## TODO
 
 Deferred work and open questions. Numbers stay.
@@ -215,9 +348,18 @@ Deferred work and open questions. Numbers stay.
      Its URL goes into `CEPH_REPO_GPGKEY`.
 
    Access to the image and the repository comes with the build, from the
-   person who provides it. Open until the first real build are the public
-   URL and whether the repository needs a login. If it does, the image build
-   needs a way to pass it.
+   person who provides it. Known from the first build, 2026-11-22, checked
+   from the lab host: the RPM repository is readable without a login, its
+   packages are signed, and `rpm -K` accepts them with the key at
+   `keys/release.asc` of the artifact store. The image is in a private
+   project of the registry and needs a login.
+
+   Run with that build on 2026-11-22 ("Build with rotation commands" in
+   `development.md`). The provider image built against it as it does
+   against the upstream image, with the signature check on. The login does
+   not have to reach the toolbox. After `docker login` and `docker pull` on
+   the host the image build used the local copy. Open: a build on a host of
+   its own architecture.
 2. **Manifests from a local checkout.** Only images are replaced. For
    libvirt-provider the `LIBVIRT_PROVIDER_CONFIG_DIR` of ironcore-in-a-box
    could be passed through. The other components need the same.
@@ -225,11 +367,14 @@ Deferred work and open questions. Numbers stay.
    Apple silicon laptops need an aarch64 build of Ceph, other laptops x86_64.
    Read in the source of the build system, not run. It builds natively, so
    an aarch64 build needs an aarch64 build machine, and the Ceph recipe sets
-   no limit on the architecture. Open whether such a machine is available.
+   no limit on the architecture. On 2026-11-22 the build system had an x86_64
+   build machine only, as reported by the person who builds, not checked from
+   the lab. A build is handed only to a machine of its own architecture, so
+   an aarch64 build submitted then stays queued and shows no error.
    When both are built, each architecture needs its own image tag, because
    the tag carries no architecture and a build is skipped when its tag
-   exists. The repository URL differs as well (TODO 1). Without an aarch64
-   build see TODO 5.
+   exists. The repository URL differs as well (TODO 1). Without a build for
+   the host's architecture see decision 9.
 4. **Memory during a keyslot operation.** Measure the provider while it adds
    a keyslot, then set the default limit from that. Measured so far with a
    stand-in, `cryptsetup luksAddKey` as a child process in the provider pod
@@ -246,28 +391,77 @@ Deferred work and open questions. Numbers stay.
    the highest is 1 GiB by default
    ([`meson_options.txt:20`](https://gitlab.com/cryptsetup/cryptsetup/-/blob/9cfdd6ba068b375a2b6cda429b3f92388448dd67/meson_options.txt#L20)).
    A provider with more CPU is therefore expected to create keyslots that
-   need more memory to open, not run.
+   need more memory to open.
 
-   Open: the same with the provider process calling librbd itself, with a
-   higher CPU limit, and at the 256Mi of ironcore-in-a-box.
+   Run on 2026-11-23 (`development.md`, "macOS" and "Keyslot cost and the
+   CPU limit"). The measurement of cryptsetup gave 64 MiB at a CPU limit of
+   0.2, 557 MiB at 2 and 668 MiB without a limit, natively on the Linux
+   host. On a Mac the x86_64 provider, through Rosetta at a limit of 2,
+   created a keyslot with 732 MiB, and QEMU's librbd opened it at attach.
+   So the CPU limit of the provider sets the memory that every later open
+   of a Volume needs, in QEMU and in the provider, and decision 9 raises
+   that limit for an emulated provider. With cryptsetup alone, an open of
+   a keyslot with 455 MiB was killed at a memory limit of 256 MiB, and so
+   was a format with free CPU at that limit. What this asks of IronCore is
+   point 8 of `ironcore-rotation-gaps.md`.
+
+   With the first build that has the commands, `rbd encryption luksAddKey`
+   as a child process in the emulated provider pod at a CPU limit of 2: the
+   memory of the pod rose by 284 MiB, to 557 MiB, of which the emulated
+   `rbd` process alone needs about 230 MiB before it derives a key. The new
+   keyslot got the settings of the existing one, 64 MiB, and not the result
+   of a measurement on that host. Emulated figures, they do not set the
+   default.
+
+   Open: the same with the provider process calling librbd itself, on a
+   native provider, and at the 256Mi of ironcore-in-a-box. A keyslot
+   command on a Volume whose keyslot needs several hundred MiB, where the
+   command gives the new keyslot the cost of the existing one.
 5. **macOS and Windows.** Run the quick start on Docker Desktop and on WSL2.
-   If a build exists for x86_64 only, a Mac with Apple silicon has three
-   routes, none of them tried:
-   - A whole x86_64 Linux VM under QEMU, for example with
-     [Lima](https://lima-vm.io/docs/config/multi-arch/). The lab should run
-     unchanged in it and very slowly, since the VM of the example is then
-     emulated twice.
-   - An arm64 Linux VM in which only the provider pod runs through QEMU
-     user-mode emulation.
-   - The same with Rosetta. el10 binaries need the x86-64-v3 CPU level and
-     Rosetta is reported to stop at v2 (`Fatal glibc error: CPU does not
-     support x86-64-v3`,
-     [RHEL-33471](https://issues.redhat.com/browse/RHEL-33471), read
-     2026-11-22), so this route is expected to fail for a build on el10.
+   If a build exists for x86_64 only, a Mac with Apple silicon uses
+   decision 9. Open there: whether Docker Desktop starts an el10 x86_64
+   image when Rosetta is turned off in its settings, and which QEMU it then
+   uses.
 
-   The last two also need the lab to build or pull the provider image for
-   another architecture and to load it into the kind node. Neither is
-   prepared.
+   Checked on 2026-11-22 on the Linux host, without a Mac or a Windows
+   machine.
+   - `lab` is the only script that runs on the host, everything else runs
+     in the toolbox. With a stand-in for `docker` it produced the same
+     `docker run` call under bash 3.2.57, the bash that macOS ships, as
+     under bash 5.2.
+   - The WSL2 kernel for x86_64 has `CONFIG_LWTUNNEL` turned off at its
+     latest release, 6.18.58.1
+     ([`config-wsl:1947`](https://github.com/microsoft/WSL2-Linux-Kernel/blob/a989171929bed4ea681be8d77333845ce1c1732a/arch/x86/configs/config-wsl#L1947)),
+     and ironcore-in-a-box lists that option as required. A Windows laptop
+     with an x86_64 CPU is therefore expected to need the custom kernel of
+     the ironcore-in-a-box guide, not run. The arm64 config has all three
+     options
+     ([`config-wsl-arm64:2040`](https://github.com/microsoft/WSL2-Linux-Kernel/blob/a989171929bed4ea681be8d77333845ce1c1732a/arch/arm64/configs/config-wsl-arm64#L2040)).
+     A running WSL2 kernel shows its options in `/proc/config.gz`.
+
+   Run on 2026-11-22 on a Mac with Apple silicon, Docker Desktop 4.76.0 on
+   macOS 27.2 (`development.md`, "macOS"), without a build under test. The
+   quick start works there with the upstream provider image, once
+   `./lab up-storage` was run a second time (decision 10). The toolbox runs
+   as root and the files it writes belong to the user. With the Rosetta
+   setting on, the el10 x86_64 programs of the upstream 21.2.0 image start
+   through `docker run`, and Rosetta offers the x86-64-v3 level.
+
+   Run on 2026-11-23 on the same Mac, with the longer wait of decision 10
+   and with the first build under test, for x86_64 (`development.md`,
+   "macOS"). `./lab up` passed from nothing in 6 minutes. The provider
+   image was built in under 4 minutes and the provider runs through Rosetta
+   inside the cluster. `/bin/bash ./lab status` works under the bash
+   3.2.57 of macOS. The run with a build under test took 16 GiB of disk.
+
+   Open on macOS: the Rosetta setting turned off, which is the question
+   above, and `./lab up` with `lab.env` in place from the start.
+
+   Open for the WSL2 run. On Linux `lab` starts the toolbox with the
+   caller's uid and with the group that the Docker socket has on the host.
+   With Docker Desktop behind WSL2 the socket inside the toolbox may belong
+   to another group, and `docker` in the toolbox would then be refused.
+   `./lab shell` followed by `docker version` shows it.
 6. **go-ceph bindings for new librbd calls.** A prototype that adds C calls
    needs them in Go. Open whether through a go-ceph fork named in the
    provider's `go.mod` or a small cgo file in the provider.
@@ -277,9 +471,9 @@ Deferred work and open questions. Numbers stay.
 8. **A provider-only mode.** For work on the provider API alone, IronCore
    plus storage without networking and VMs would start faster and avoid the
    kernel requirements of dpservice. Not tried.
-9. **Upstream.** Propose the loop device fix and the start-up order fix to
-   ironcore-in-a-box, and ask whether overrides for all components would be
-   welcome there.
+9. **Upstream.** Propose the loop device fix, the start-up order fix and a
+   longer wait for the monitor address (decision 10) to ironcore-in-a-box,
+   and ask whether overrides for all components would be welcome there.
 10. **QEMU's old librbd against a rewritten header.** Decision 3 relies on
     two things. The I/O of a running VM continues while the provider
     rewrites the LUKS header, and at the next attach QEMU's librbd 18.2.7
@@ -296,9 +490,14 @@ Deferred work and open questions. Numbers stay.
       removed another was unlocked by the older one with the new
       passphrase. The old passphrase was refused.
 
-    Open: the same with a build whose librbd does the rotation itself, and
-    with a guest that writes to a mounted filesystem. The I/O of the check
-    was sent through the QEMU monitor.
+    Repeated on 2026-11-22 with a build whose `rbd` changes the header
+    through librbd 22 ("Build with rotation commands" in `development.md`).
+    The second point held: QEMU's librbd 18.2.7 unlocked the rewritten
+    header with the new passphrase at the next attach. The first did not
+    hold every time, see TODO 13.
+
+    Open: a guest that writes to a mounted filesystem. The I/O of both
+    checks was sent through the QEMU monitor.
 11. **The new passphrase on the VM side.** QEMU's librbd gets the passphrase
     at every attach, from the Secret that the Volume names. After a rotation
     that Secret has to hold the new one. Seen in the header rewrite check,
@@ -325,9 +524,117 @@ Deferred work and open questions. Numbers stay.
       load fail`). So the old keyslot may only go when nothing attaches with
       the old passphrase any more.
 
+    What IronCore would need to change for this is collected in
+    `ironcore-rotation-gaps.md`.
+
     Open: the order of the steps of a rotation (new keyslot, Secret, old
     keyslot) and what tells the provider that every VM has moved on. Also
     whether the disk has to leave the VM at all. QEMU keeps working with the
     volume key it has, and machinepoollet carries a note for an update in
     place
     ([`:372`](https://github.com/ironcore-dev/ironcore/blob/ee24604077faa679d6e22b06c543ca0a578b5db7/poollet/machinepoollet/controllers/machine_controller_volume.go#L372)).
+12. **Image build time under emulation.** With `CEPH_PLATFORM` the whole
+    image build is emulated, and the Go compile of the provider took 48
+    minutes on the test host, against under 5 minutes natively. Idea, not
+    tried: take the Go toolchain for the architecture of the host
+    (`FROM --platform=$BUILDPLATFORM`) and set `GOARCH` to the target, so
+    that only the C compiler and the linker of the Ceph image run emulated.
+    A second build on the same host took 4 minutes, the Go compile 114 s
+    of it, because the build cache of the first one was still there.
+    Under Rosetta on a Mac the first build took 3 min 43 s, the Go compile
+    133 s of it, so the idea matters for hosts that emulate with QEMU.
+13. **A header command can hang while the VM writes.** Seen with the build
+    `22.0.0-143-g9cce574d9dc7` ("Build with rotation commands" in
+    `development.md`). Five of seven runs of `rbd encryption luksAddKey`,
+    `keyslot add`, `keyslot remove` and `luksKillSlot` did not return while
+    the VM wrote to the disk. The `rbd` process kept the exclusive lock of
+    the image, and the VM's write waited until the process was killed, in
+    one run 775 s. With an idle VM every command returned within 8 s.
+
+    Example. `luksAddKey` changes three ranges of the header: the two copies
+    of the metadata and the area of the new keyslot. They are written one
+    after the other, lowest offset first. After the kill the image had both
+    metadata copies with the new keyslot in them and no key material for
+    it. The new passphrase was refused, the old one still unlocked.
+
+    From the librbd log of one run, with the source of that build (paths in
+    the Ceph tree at commit `9cce574d9dc7`): the command starts each write
+    as an operation that is already in flight
+    (`src/librbd/crypto/luks/HeaderSession.cc:183`). When QEMU asks for the
+    lock back between two of them, the next write is held back until the
+    lock is taken again (`src/librbd/exclusive_lock/ImageDispatch.cc:138`),
+    and the release of the lock flushes first
+    (`src/librbd/exclusive_lock/PreReleaseRequest.cc:228`), which waits for
+    all operations in flight (`src/librbd/io/AsyncOperation.cc:79`). A
+    write through the public API is counted as in flight only after the
+    lock layer (`src/librbd/io/ImageDispatch.cc:23`), which fits the
+    stand-in of TODO 10 not hanging.
+
+    Confirmed on 2026-11-22 outside the lab ("Cause of the hang" in
+    `development.md`). A native build of the same commit hangs in the same
+    place when a second librbd client writes and the lock request of that
+    client lands between two header writes, in 4 of 5 runs. A debugger on
+    the hung process shows the lock in its release step, one write held
+    back in the lock layer and the flush of the release waiting for that
+    write. When the command no longer marks the write as in flight and
+    leaves that to the core layer, as for a write through the public API,
+    it returned in 8 of 8 runs. In 7 of them it gave the lock to the other
+    client between two header writes and took it back. Emulation is
+    therefore not the cause. It makes each write slower, which widens the
+    gap that the lock request has to hit.
+
+    A caller can avoid the hang with the build as it is. It takes the
+    exclusive lock in transient mode around the write-back of the header
+    (`rbd_lock_acquire` with `RBD_LOCK_MODE_EXCLUSIVE_TRANSIENT`, then
+    `rbd_lock_release`). The other client then waits for the release
+    instead of getting the lock between two header writes. Natively this
+    returned in 8 of 8 runs, around the commit of `luksAddKey` and around
+    the typed call `encryption_luks_keyslot_add`. Around the commit the
+    other client's write waited 0.3 s, around the typed call 2.2 to 2.8 s,
+    because that call also derives the key. The handle should be one that
+    is opened for the header command only, because after a manual lock a
+    handle no longer takes the lock by itself. Not tested with QEMU's
+    librbd 18.2.7 as the waiting client. This belongs into the Go binding
+    of TODO 6.
+
+    Open for the librbd change, not for the lab: with the one call changed
+    the other client writes between two header writes of one command. The
+    typed call (`UpdateHeaderRequest.cc` in `src/librbd/crypto/luks/`) has
+    the same call and hung natively in 4 of 5 runs.
+    `HeaderRestoreRequest.cc` has it too and was not tested. The same
+    cycle also occurred with code that upstream ships, in 1 of 90 runs of
+    `encryption_format` on a handle that writes at the same time, so the
+    cause is not specific to this build.
+
+    Until a build changes this, run the header commands of this build only
+    while the VM does not write, call them through a caller that takes the
+    transient lock, or expect to kill them. After the kill
+    QEMU needed just under 30 s to take the lock, then the VM's I/O went on.
+
+    Open: a build with a fix, the same check with the provider calling
+    librbd, and whether the order of the writes should put the keyslot area
+    before the metadata, so that a stop in between leaves the old header.
+
+14. **A fixed keyslot cost when a Volume is created.** Deferred on
+    2026-11-23. The format call of librbd takes no cost
+    ([`librbd.h:443`](https://github.com/ceph/ceph/blob/b060042deb05d33e6cc358970cfb8221240bcf3e/src/include/rbd/librbd.h#L443-L447)),
+    so libcryptsetup measures the CPU of the provider and the result
+    differs from host to host (TODO 4). Until this is done the rotation is
+    the one place that can give a Volume a known cost (point 8 of
+    `ironcore-rotation-gaps.md`).
+
+    Example. The same Volume gets a keyslot with 64 MiB from a provider at
+    a CPU limit of 0.2 and one with 557 MiB at a limit of 2. Opening the
+    second one needs more memory than a provider at 256Mi has.
+
+    Two ways were looked at. Cost fields in the format options of librbd
+    are the direction so far, not decided. The options of the keyslot call
+    in the build under test have such fields already, the format options
+    have the cipher and the passphrase only. The other way is a header that
+    the caller builds with libcryptsetup and writes with the header restore
+    call of that build, run on an image that was never formatted
+    (`development.md`, "Keyslot cost and the CPU limit").
+
+    Open. Which way, and which cost. How librbd tells format options with
+    the new fields from the ones that callers pass today. For the second
+    way an attach through QEMU's librbd 18.2.7 and the same on a clone.

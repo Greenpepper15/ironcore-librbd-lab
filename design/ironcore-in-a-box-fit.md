@@ -107,6 +107,15 @@ library, and the kind node is Debian by package. Decisions 2 and 3 in
 5. **The host needs make and Go**, and the Makefile installs kind and cmctl
    with `go install`. Not a fault, but more than "Docker only".
 
-Points 2 and 3 are plain fixes that could go upstream. Point 1 is a feature
+6. **The wait for the address of the Ceph monitor is 100 s.** Before the
+   provider is deployed, a script reads the address from a ConfigMap of
+   Rook, 20 tries 5 s apart
+   ([`detect-ceph-mon-enpoints.sh:11`](https://github.com/ironcore-dev/ironcore-in-a-box/blob/8263adde111d43b0d7bd68d6e0701dcb530db2cd/hack/detect-ceph-mon-enpoints.sh#L11-L12)).
+   In that time the kind node pulls the Rook image and the Ceph image. Run:
+   55 and 60 s of the 100 on the Linux test host, and a timeout on a Mac,
+   where the Ceph cluster was ready 90 s after it (decision 10). A second
+   run on that Mac needed 102 s.
+
+Points 2, 3 and 6 are plain fixes that could go upstream. Point 1 is a feature
 ironcore-in-a-box could grow, its `hack/mutate-*.sh` pattern is made for it.
 None of this has been proposed upstream yet.
