@@ -41,7 +41,9 @@ up-storage: cluster ## Rook Ceph and the ceph-volume-provider
 	$(IIAB_MAKE) prepare-local-config
 	$(KUBECTL) apply -k $(IIAB_CONFIG)/rook-operator
 	hack/apply-overrides.sh rook-cluster
-	cd $(IIAB) && hack/detect-ceph-mon-enpoints.sh
+	@# 15 minutes instead of 100 s: the node pulls the Rook and Ceph images
+	@# first, which takes longer than that on a slow link (decision 10).
+	cd $(IIAB) && MAX_RETRIES=180 hack/detect-ceph-mon-enpoints.sh
 	hack/apply-overrides.sh ceph-volume-provider
 	@# The provider exits while its pool does not exist yet. Wait for the
 	@# pool, then restart it instead of waiting out the crash loop back-off.

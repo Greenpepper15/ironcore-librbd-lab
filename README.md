@@ -21,18 +21,27 @@ try.
 
 ## State
 
-Run on one machine so far, a Linux arm64 VM (Ubuntu 22.04, kernel 5.15,
-Docker 29.1, 8 CPUs, no KVM). On it, `./lab up` and the example below work
-with the upstream Ceph 21.2.0 image standing in for the build under test.
+Run on two machines so far. On a Linux arm64 VM (Ubuntu 22.04, kernel 5.15,
+Docker 29.1, 8 CPUs, no KVM) `./lab up` and the example below work with the
+upstream Ceph 21.2.0 image standing in for the build under test. A first
+image from Clyso's build system, for x86_64, was run there as well, through
+emulation.
 
-Not run yet: macOS, Windows with WSL2, x86_64, and an image from Clyso's build
-system. `design/development.md` lists what was checked and what is assumed.
+On a Mac with Apple silicon (macOS 27.2, Docker Desktop 4.76) `./lab up`
+and the example work as well, `up` in 6 minutes from nothing. The image for
+x86_64 was run there too. Docker Desktop starts its provider through
+Rosetta, and the provider image was built in under 4 minutes.
+
+Not run yet: Windows with WSL2 and a host with x86_64 CPUs.
+`design/development.md` lists what was checked and what is assumed.
 
 ## What you need
 
 - Docker with about 8 GiB of memory for it, and bash. Nothing else is
   installed on the host. make, Go, kind and kubectl run in a toolbox
   container that `./lab` builds on first use.
+- Free disk for the images. A run with a build under test took 16 GiB on
+  a Mac.
 - The kernel features that ironcore-in-a-box asks for. Its README covers
   Linux, macOS and the custom kernel that WSL2 needs.
 
@@ -41,7 +50,7 @@ system. `design/development.md` lists what was checked and what is assumed.
 ```sh
 git clone --recurse-submodules <this repository>
 cd ironcore-librbd-lab
-./lab up                                              # 8 minutes once the images are pulled
+./lab up                                              # 8 to 12 minutes on the two test hosts
 ./lab kubectl apply -f examples/encrypted-volume.yaml # VM with a LUKS2 data volume
 ./lab kubectl get volume,machine
 ./lab status                                          # which librbd runs where
@@ -103,6 +112,9 @@ CEPH_PROVIDER_DIR=/path/to/ceph-provider        # your checkout
 CEPH_VOLUME_PROVIDER_IMAGE=lab/ceph-volume-provider:dev
 ```
 
+If the image needs a login, run `docker login` and `docker pull` for it on
+the host first. The build then uses the local copy.
+
 Then:
 
 ```sh
@@ -118,6 +130,46 @@ any Go code exists.
 
 After a change in the checkout, repeat `build-ceph-volume-provider` and
 `deploy`. The VM keeps running while the provider is replaced.
+
+### A build for another architecture than the host
+
+A build may exist for x86_64 only while the host is arm64, for example an
+Apple silicon Mac. Name its platform in `lab.env` as well:
+
+```sh
+CEPH_PLATFORM=linux/amd64
+```
+
+The provider image is then built for that platform and its pod runs through
+QEMU's user-mode emulation. Everything else stays native (decision 9 in
+`design/design-decisions.md`). This is slow, the first image build took 51
+minutes on the test host, and timings of the provider mean nothing in this
+mode. The lab gives the emulated provider 2 CPUs instead of the 200m of
+ironcore-in-a-box. A Linux host needs the emulation registered once per boot:
+
+```sh
+docker run --privileged --rm tonistiigi/binfmt --install amd64
+```
+
+Docker Desktop on a Mac brings the emulation along and uses Rosetta unless
+that setting is turned off. An x86_64 provider on an el10 Ceph image runs
+there through Rosetta, and its image build took under 4 minutes.
+
+### CPU and memory of the provider belong together
+
+When a volume is created, libcryptsetup measures how fast the provider
+derives a key and stores a memory cost in the keyslot, between 64 MiB and
+1 GiB. Every later open of that volume needs this memory again, in QEMU at
+attach and in the provider for a keyslot command, and it takes longer on
+less CPU. At the 200m of ironcore-in-a-box the cost stays at 64 MiB. With
+2 CPUs it was 557 MiB on the Linux test host and 732 MiB on a Mac.
+
+So when you raise the CPU limit (`CEPH_VOLUME_PROVIDER_CPU`, or
+`CEPH_PLATFORM`, which sets it to 2), whatever opens the volume needs its
+own memory plus up to 1 GiB. The lab's 2Gi for the provider leaves room
+for that. The 256Mi of ironcore-in-a-box do not. A keyslot of 455 MiB could
+not be opened at that limit. The measurements are in
+`design/development.md`, "Keyslot cost and the CPU limit".
 
 ## Changing other IronCore components
 

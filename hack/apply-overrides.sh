@@ -33,14 +33,24 @@ images_of() {
 
 # A locally built image gets a tag derived from its image ID and is loaded
 # into the node. A rebuild then changes the tag, which triggers a rollout.
+# An image for another platform than the host is named with its platform,
+# because "kind load docker-image" cannot save it (design decision 9).
 resolve_image() {
-    local ref=$1 id
+    local ref=$1 platform=${2:-} id
     if id=$(docker image inspect -f '{{.Id}}' "$ref" 2>/dev/null); then
         local unique="${ref%:*}:${id:7:12}"
         docker tag "$ref" "$unique"
         if ! docker exec "$NODE" crictl inspecti -q "$unique" >/dev/null 2>&1; then
             echo "loading $unique into $NODE" >&2
-            "$KIND" load docker-image --name "$CLUSTER" "$unique" >&2
+            if [ -n "$platform" ]; then
+                local tar="$LAB_DIR/.lab/load.tar"
+                mkdir -p "$LAB_DIR/.lab"
+                docker save --platform "$platform" -o "$tar" "$unique"
+                "$KIND" load image-archive --name "$CLUSTER" "$tar" >&2
+                rm -f "$tar"
+            else
+                "$KIND" load docker-image --name "$CLUSTER" "$unique" >&2
+            fi
         fi
         echo "$unique"
     else
@@ -58,12 +68,15 @@ render() {
         echo "  - ../../../ironcore-in-a-box/.tmp/config/cluster/local/$component"
     } > "$out/kustomization.yaml"
 
-    local images="" pair var name ref
+    local images="" pair var name ref platform
     for pair in $(images_of "$component"); do
         var=${pair%%=*}; name=${pair#*=}
         ref=${!var:-}
         [ -z "$ref" ] && continue
-        ref=$(resolve_image "$ref")
+        # Only the volume provider is built for the platform of the Ceph build.
+        platform=""
+        [ "$var" = CEPH_VOLUME_PROVIDER_IMAGE ] && platform=${CEPH_PLATFORM:-}
+        ref=$(resolve_image "$ref" "$platform")
         images+="  - name: $name"$'\n'"    newName: ${ref%:*}"$'\n'"    newTag: \"${ref##*:}\""$'\n'
         changed=1
     done
@@ -88,6 +101,11 @@ render() {
             # ironcore-in-a-box limits the provider to 256Mi. The provider with
             # librbd 21 uses about 200 MiB, so an rbd command or a keyslot
             # operation in the same container gets it OOM-killed.
+            # An emulated provider (CEPH_PLATFORM) is throttled all the time
+            # at the 200m CPU of ironcore-in-a-box and restarts in a loop.
+            local limits="memory: ${CEPH_VOLUME_PROVIDER_MEMORY:-2Gi}" cpu=${CEPH_VOLUME_PROVIDER_CPU:-}
+            [ -z "$cpu" ] && [ -n "${CEPH_PLATFORM:-}" ] && cpu=2
+            [ -n "$cpu" ] && limits+=", cpu: \"$cpu\""
             patches+="  - patch: |-"$'\n'
             patches+="      apiVersion: apps/v1"$'\n'
             patches+="      kind: Deployment"$'\n'
@@ -97,7 +115,7 @@ render() {
             patches+="          spec:"$'\n'
             patches+="            containers:"$'\n'
             patches+="              - name: ceph-volume-provider"$'\n'
-            patches+="                resources: {limits: {memory: ${CEPH_VOLUME_PROVIDER_MEMORY:-2Gi}}}"$'\n'
+            patches+="                resources: {limits: {$limits}}"$'\n'
             changed=1 ;;
     esac
     if [ -n "$patches" ]; then

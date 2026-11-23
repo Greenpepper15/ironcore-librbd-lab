@@ -10,7 +10,19 @@ LAB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 : "${CEPH_REPO_URL:?set CEPH_REPO_URL to the RPM repository of the same Ceph build}"
 image=${CEPH_VOLUME_PROVIDER_IMAGE:?set CEPH_VOLUME_PROVIDER_IMAGE to the tag to build, e.g. lab/ceph-volume-provider:dev}
 
-docker build \
+# A Ceph build for another architecture than the host (design decision 9).
+platform=()
+if [ -n "${CEPH_PLATFORM:-}" ]; then
+    platform=(--platform "$CEPH_PLATFORM")
+    if ! docker run --rm "${platform[@]}" --entrypoint /usr/bin/true "$CEPH_IMAGE"; then
+        echo "cannot start a $CEPH_PLATFORM program from $CEPH_IMAGE on this host." >&2
+        echo "If the line above says \"exec format error\", the kernel has no emulation for it. On Linux:" >&2
+        echo "  docker run --privileged --rm tonistiigi/binfmt --install ${CEPH_PLATFORM#*/}" >&2
+        exit 1
+    fi
+fi
+
+docker build "${platform[@]}" \
     -f "$LAB_DIR/images/ceph-volume-provider/Dockerfile" \
     --build-arg "CEPH_IMAGE=$CEPH_IMAGE" \
     --build-arg "CEPH_REPO_URL=$CEPH_REPO_URL" \
@@ -21,5 +33,5 @@ docker build \
 
 echo
 echo "built $image"
-docker run --rm --entrypoint sh "$image" -c \
+docker run --rm "${platform[@]}" --entrypoint sh "$image" -c \
     'echo "librbd in the image: $(rpm -q librbd1)"; echo "linked against:      $(ldd /ceph-volume-provider | grep -E "librbd|librados" | tr -s " \t" " " | tr "\n" ";")"'
