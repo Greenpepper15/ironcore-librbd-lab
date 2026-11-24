@@ -463,6 +463,40 @@ such an image to a VM, where QEMU's librbd 18.2.7 opens it, the same on a
 clone, and the exit code of the restore command, which the test script did
 not keep.
 
+### Go bindings under a writing VM
+
+Run 2026-11-24 on the arm64 host, with the second build under test (x86_64,
+emulated) and the cluster of the runs above. The two bindings of decisions
+13 and 14 were built into one program, `hack/header-session-check/main.go`,
+against the packaged headers of the build (`build.sh`, 4 min 25 s). The
+header package `cryptsetup-devel` 2.8.6 came from the CRB repository. The
+program ran in the provider pod on the volume `hdrtest`, attached to the VM,
+while the I/O loop of the header rewrite check wrote through the QEMU
+monitor. Each run stages the header through librbd, changes one keyslot
+with libcryptsetup and commits. The librbd of the program logged its lock
+events (`debug_rbd=20`). The helpers are in
+`hack/header-session-check/run.sh`.
+
+| Run | Lock around the commit | Result |
+|---|---|---|
+| Add a keyslot | transient | commit 0.22 s, lock held 0.29 s. QEMU asked for the lock three times meanwhile and waited. Slowest VM write 0.53 s, no error in 120 rounds. Both passphrases open |
+| Remove the old keyslot | transient | commit 0.21 s. Slowest VM write 0.49 s, no error in 152 rounds. Only the new passphrase opens |
+| Add a keyslot | no lock call | commit 1.22 s. librbd took the lock three times, once per header write, and gave it to QEMU after each. The header was half written for 0.41 s and for 0.35 s. No error in 135 rounds |
+| Remove a keyslot | no lock call | commit 1.46 s, the same sequence. No error in 151 rounds |
+| Add a keyslot | transient, held 5 s before the commit | one VM write waited 5.5 s. No error in 139 rounds |
+| Remove a keyslot | `LockModeExclusive`, held 5 s before the commit | the commit succeeded. In those 5 s QEMU logged 20 writes as failed with "Read-only file system" and refused 20 flushes. After the release 65 rounds without error |
+
+So a rotation through the Go bindings works while the VM writes, and the
+transient lock is the one to use: without a lock call the header is written
+in pieces with QEMU's writes in between, and `LockModeExclusive` makes the
+writes of the VM fail. A new keyslot got argon2id with 64 MiB, 4 iterations
+and 4 threads, as set. The program peaked at 283 MiB and the pod at 557 MiB
+of its 2Gi, emulated figures that do not set a default. Afterwards the
+header was restored from the dump of the start state.
+
+Not run: the provider itself calling the bindings, the provider pod at a
+lower memory limit, and I/O from a guest with a mounted filesystem.
+
 ## Assumed, not run
 
 - A build from Clyso's build system on a host of its own architecture. The
