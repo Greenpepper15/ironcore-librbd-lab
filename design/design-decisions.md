@@ -357,7 +357,8 @@ version that ironcore-in-a-box names, v0.6.0, while the source is 16
 commits newer (TODO 2).
 
 **Implementation.** Submodule `ceph-provider`, its URL is in `.gitmodules`,
-pinned at `4c61421`. `hack/build-ceph-volume-provider.sh` builds from it
+pinned at `4c61421`, and since decision 14 one commit further.
+`hack/build-ceph-volume-provider.sh` builds from it
 when `CEPH_PROVIDER_DIR` is empty, and says how to fetch it when the
 directory is empty.
 
@@ -411,7 +412,8 @@ modules than the version in `go.mod` stops the build, because the `go.sum`
 of the provider is not written anew.
 
 **Implementation.** Submodule `go-ceph`, its URL is in `.gitmodules`,
-pinned at `e7e4b0b`, the commit of v0.41.0.
+pinned at `e7e4b0b`, the commit of v0.41.0, and since decision 13 one
+commit further.
 `hack/build-ceph-volume-provider.sh` hands the directory to the image
 build as the named build context `go-ceph`.
 `images/ceph-volume-provider/Dockerfile` copies it to `/go-ceph` and
@@ -427,9 +429,233 @@ the binary that the lab runs names the released module with its checksum.
 The new binary links the librbd of the image and starts. `go.sum` needed
 no change. The same was run before on the stand-in image without
 emulation, in 64 s. With an empty directory as go-ceph source the script
-stops with the hint to fetch the submodule. Not run: a deploy of such an
-image, a go-ceph commit other than v0.41.0, and a clone from nothing with
-both submodules.
+stops with the hint to fetch the submodule. On 2026-11-24 a clone from
+nothing with `--recurse-submodules` brought both submodules at their pins
+with the same trees, and the build script found both sources in it. Not
+run: a deploy of such an image and a go-ceph commit other than v0.41.0.
+
+## 13. The header session gets a thin go-ceph binding behind a build tag of its own, and the caller decides how the lock is held
+
+**Problem.** The second build under test can hand out the LUKS header of
+an image as a file. librbd stages a copy and returns a file descriptor,
+the caller changes the copy with libcryptsetup, and a commit writes the
+changed parts back. These are three calls in `librbd.h`, open, commit and
+close, and go-ceph has none of them. A binding has to say what Go code
+sees of such a session, who takes the exclusive lock around the commit,
+and how a provider that uses the binding still builds against a Ceph
+without the calls.
+
+Example. The quick start uses the upstream image of Ceph 21.2.0, whose
+`librbd.h` lacks the three calls. A Go file that names one of them stops
+the build there with `could not determine what
+C.rbd_encryption_luks_header_open refers to`.
+
+**Why.** One Go type stands for the session.
+`(*Image).EncryptionLUKSHeaderOpen()` returns an `*EncryptionLUKSHeader`
+with the methods `Fd()`, `Commit()` and `Close()`. Each of the three
+librbd calls has one method, named and documented the way go-ceph does it
+for `EncryptionLoad2`
+([`encryption_load2.go:59`](https://github.com/ceph/go-ceph/blob/e7e4b0b8b5047658c44c4c6f9c7e5db471f7a23f/rbd/encryption_load2.go#L59)).
+`Close` also closes the descriptor, so one deferred call releases
+everything. The session keeps its image and refuses a commit once the
+image is closed, as `Watch` does
+([`watchers.go:128`](https://github.com/ceph/go-ceph/blob/e7e4b0b8b5047658c44c4c6f9c7e5db471f7a23f/rbd/watchers.go#L128)),
+because librbd would use a freed image there.
+
+The caller decides how the lock is held. `Commit` makes no lock call, as
+the C call makes none, and go-ceph has the calls that a caller needs,
+[`LockAcquire`](https://github.com/ceph/go-ceph/blob/e7e4b0b8b5047658c44c4c6f9c7e5db471f7a23f/rbd/locks.go#L33)
+and
+[`LockRelease`](https://github.com/ceph/go-ceph/blob/e7e4b0b8b5047658c44c4c6f9c7e5db471f7a23f/rbd/locks.go#L139).
+There are three ways, and all three were run in the lab while a VM wrote
+to the image (`development.md`, "Go bindings under a writing VM").
+
+- No lock call. librbd takes the lock for each write of the header and
+  hands it to the other client in between. The commit took 1.2 s, and
+  the header was half written twice, for 0.4 s each.
+- `LockAcquire(LockModeExclusiveTransient)` before the commit and
+  `LockRelease` after. The other client waits. The commit took 0.2 s and
+  no write of the VM failed. The `rbd` tool of the build does this
+  (`src/tools/rbd/action/EncryptionLuks.cc:106-120`), and it is the way
+  for the provider.
+- `LockAcquire(LockModeExclusive)`. The lock is kept as well, but the
+  writes of the VM failed with "Read-only file system" meanwhile.
+
+Every method of the binding stays one librbd call.
+
+The binding sits behind a build tag of its own,
+`ceph_luks_header_session`. The calls are in no Ceph release and not in
+Ceph `main`, so neither of go-ceph's tags for new calls, `ceph_preview`
+and `ceph_main`, says where they exist. The provider file that calls the
+binding carries the same tag. A build without the tag has neither, and
+the quick start keeps working.
+
+The branch starts at the pin, `e7e4b0b`. The `master` of the fork is 77
+commits further, and a go-ceph that needs other modules stops the build
+of the provider (decision 12).
+
+**Alternatives that lost.**
+- The lock inside `Commit`. No caller could forget it. But `Commit` would
+  make three librbd calls and behave unlike the C call it is named after,
+  and an image without the exclusive-lock feature would be a special case
+  inside the binding.
+- One function that opens the session, hands the file to a callback,
+  commits and closes. Short for the caller. But a session can commit more
+  than once, and a rotation uses that: add a keyslot, commit, test,
+  remove the old one, commit.
+- An `*os.File` in place of the descriptor number. libcryptsetup takes a
+  path, `/proc/self/fd/<fd>`, and a second owner of the descriptor is one
+  more way to close it twice.
+- `ceph_preview` alone. It breaks the build of the example for every
+  provider that sets it.
+- Bindings for the header dump and restore calls of the build as well.
+  Nothing calls them yet. They can follow when a variant needs them.
+
+**What we accept.** Three things are left to the caller, and nothing in
+the binding checks them: taking the lock around the commit, freeing the
+libcryptsetup handle before the commit, and closing the session before
+the image. librbd asks its callers to serialize header updates, and the
+binding passes that on. A caller can pick a way to hold the lock that is
+wrong for an image in use, and the binding does not stop it. Its names
+follow the C calls of a prototype and
+change with them. It is not listed in `docs/api-status.json` of go-ceph
+and can be offered there only after librbd has the calls. Its test runs
+against a local build of the same Ceph commit, not against the packaged
+build (TODO 16).
+
+**Implementation.** Branch `luks-header-session` of the go-ceph fork, from
+`e7e4b0b`, with `rbd/encryption_luks_header.go` and
+`rbd/encryption_luks_header_test.go`, both with
+`//go:build ceph_luks_header_session`. A build under test that has the
+calls sets `CEPH_PROVIDER_GO_BUILD_TAGS=ceph_luks_header_session` in
+`lab.env`. The lab pins the submodule at `e0f6508`, one commit after
+`e7e4b0b`. `Fd()` returns a `uintptr` as `os.File` does. A session that
+was closed answers with `ErrEncryptionLUKSHeaderClosed`.
+
+The test formats an image with LUKS2, opens a session and checks nine
+cases. The file starts with the LUKS magic. A commit without a change
+succeeds, twice. A changed file is written back: the header of a second
+image, copied into the file and committed under the lock, makes the first
+image load with the passphrase of the second and no longer with its own.
+An empty file is refused with `EINVAL` and the image keeps its header. A
+commit on an image opened read-only is refused with `EROFS`. A closed
+session and a session whose image was closed first refuse the commit, and
+the second can still be closed. An image without a LUKS header gets no
+session. go-ceph does not link libcryptsetup, so a keyslot change is
+tested with the wrapper of decision 14.
+
+Checked on 2026-11-24 on the Linux test host, natively. The client was a
+local build of the second build's commit (`2fd833e9b5ec`), the cluster
+Ceph 21.2.0 in a container, started with the `micro-osd.sh` of go-ceph.
+The nine cases passed in 46 s. With the commit taken out of the third
+case the test failed in both of its checks, so it can tell a commit that
+writes nothing. Without the tag the test is not built, and a Go program
+that names the three calls stops against the `librbd.h` of v21.2.0 with
+the error of the example.
+
+The image build of the lab, with the tag set, built the provider against
+the packaged header of the second build under test in 6 minutes, x86_64
+under emulation. The binary records the tag and refers to
+`rbd_encryption_luks_header_open` of the image's librbd. Nothing in the
+provider calls the binding yet.
+
+Run in the lab on the same day, in the provider pod while a VM wrote to
+the image (`development.md`, "Go bindings under a writing VM"). With the
+transient lock a commit took 0.2 s and QEMU waited. Without a lock call
+it took 1.2 s, and the lock went to QEMU between the header writes. With
+`LockModeExclusive` the writes of the VM failed. Not run: the test
+against the packaged build (TODO 16).
+
+## 14. The provider gets a small cgo package for libcryptsetup, with the calls of a rotation and nothing that orders them
+
+**Problem.** With the header session (decision 13) librbd hands out the
+LUKS header as a file, and the caller changes the keyslots in it with
+libcryptsetup. The provider is written in Go and has no code that calls
+libcryptsetup.
+
+Example. To store a second passphrase the caller needs `crypt_init` on
+`/proc/self/fd/<fd>`, `crypt_load`, `crypt_set_pbkdf_type` for the cost
+of the new keyslot, and `crypt_keyslot_add_by_passphrase`. None of the
+four can be called from the provider today.
+
+**Why.** A package `internal/cryptsetup` in the provider wraps these calls
+with cgo. The library is in the upstream image of the provider already,
+because librbd links it
+([`Dockerfile:118`](https://github.com/ironcore-dev/ceph-provider/blob/4c614216a8b33f5a65aa843aef896844f7f6b8e3/Dockerfile#L118)).
+The package has what a rotation in two steps needs: open a header, list
+the keyslots in use with their cost, set the cost of keyslots created
+from then on without a measurement on the host, add a keyslot, find the
+keyslot that a passphrase opens, and remove a keyslot. It does not order
+these steps and knows nothing of librbd, so it works on any file with a
+LUKS header.
+
+Three things it does by itself. It refuses to remove the last keyslot in
+use, which libcryptsetup would do. It keeps passphrases in memory that
+libcryptsetup wipes when it is freed. And it puts the error messages of
+libcryptsetup into the error it returns, where the library would print
+them to the output of the provider.
+
+The package sits behind the build tag of decision 13. A provider built
+without the tag needs no header files of libcryptsetup and is the
+provider of today.
+
+**Alternatives that lost.**
+- The `rbd` tool of the build as a child process. It ran by hand in the
+  lab. But the provider starts no process today, and its upstream image
+  has no `rbd`.
+- A second container next to the provider that runs the tool. An image, a
+  memory limit and a protocol of its own.
+- The Go binding
+  [martinjungblut/go-cryptsetup](https://github.com/martinjungblut/go-cryptsetup).
+  Its last commit is from May 2022, and it has no call to remove a
+  keyslot, to list keyslots or to set the cost of a new one.
+- A wrapper for `crypt_keyslot_change_by_passphrase`, which replaces a
+  passphrase in one step. A change that is cut off between the two
+  writes of the header can leave no passphrase that opens the image.
+
+**What we accept.** The key derivation runs inside the provider process.
+Its memory limit has to cover the provider plus the cost of the keyslot
+that is opened or created (TODO 4). A libcryptsetup handle is not safe
+for use from two goroutines at once, and the package does not guard it.
+A build with the tag needs the header package of libcryptsetup: the
+image build of the lab needs `cryptsetup-devel` and the upstream
+Dockerfile `libcryptsetup-dev`. Neither is added yet, because nothing in
+the provider imports the package so far. When a header cannot be opened
+at all, libcryptsetup still prints one line to the output of the
+provider, because the package has no handle yet to catch it with.
+
+**Implementation.** Branch `luks-header-rotation` of the ceph-provider
+fork, from `4c61421`. `internal/cryptsetup/cryptsetup.go` has the type
+`Device` with `Open`, `Close`, `Type`, `Keyslots`, `SetPBKDF`,
+`AddKeyslot`, `CheckPassphrase` and `RemoveKeyslot`. A failed call
+returns an error that wraps the errno of libcryptsetup, for example
+`syscall.EPERM` for a passphrase that opens no keyslot. Its tests need a
+LUKS header in a file, and Go allows no cgo in test files, so
+`internal/cryptsetup/cryptsetuptest` creates one. All files carry
+`//go:build ceph_luks_header_session`. The lab pins the submodule at
+`8f93bdc`, one commit after `4c61421`.
+
+`cryptsetup_test.go` runs the steps on a file: add a keyslot with a fixed
+cost, check both passphrases, remove the old keyslot, check again, open
+the file anew. `headersession_test.go` does the same on an RBD image with
+the binding of decision 13, in two commits, and asks librbd after each
+whether the image loads with the old and with the new passphrase. It
+needs a cluster, named by `CEPH_CONFIG_FILE`, and is skipped without.
+
+Checked on 2026-11-24 on the Linux test host, natively, with
+libcryptsetup 2.8.6 and as a user without privileges. The five tests on
+a file passed in 3 s. A keyslot added after `SetPBKDF` with argon2id, 4
+iterations, 64 MiB and 4 threads reads back with exactly these values.
+Without `SetPBKDF` the same test failed, because libcryptsetup measured
+the host and gave the keyslot 653 MiB. The test on an RBD image passed in
+25 s against the cluster of decision 13: after the first commit the image
+loaded with both passphrases, after the second with the new one only.
+
+The package was built with `cryptsetup-devel` 2.8.6 of el10 and run in
+the provider pod while a VM wrote to the image (`development.md`, "Go
+bindings under a writing VM"): a keyslot added and one removed, with the
+cost as set. Not run: the provider pod at a memory limit below 2Gi, and a
+LUKS1 header.
 
 ## TODO
 
@@ -773,3 +999,18 @@ Deferred work and open questions. Numbers stay.
     under test. Whether a prototype branch is rebased on upstream before
     it is shown to anyone. Whether the lab should say so when a pin is
     behind.
+
+16. **The test of a binding against the packaged build.** go-ceph runs
+    its tests in a container of its own, on the Ceph image that
+    `CEPH_IMG` and `CEPH_TAG` name
+    ([`Dockerfile:1`](https://github.com/ceph/go-ceph/blob/e7e4b0b8b5047658c44c4c6f9c7e5db471f7a23f/testing/containers/Dockerfile#L1)).
+    Read, not run: its package step installs the header packages from the
+    repository file of the image when there is one, and otherwise from
+    download.ceph.com or from Ceph's CI
+    ([`setup-pkgs.sh:22`](https://github.com/ceph/go-ceph/blob/e7e4b0b8b5047658c44c4c6f9c7e5db471f7a23f/testing/containers/setup-pkgs.sh#L22)),
+    and it compares the Ceph version of the image with a release name.
+
+    Open. Whether that container builds on the image of a build under
+    test, and how long its test cluster takes under emulation. Until then
+    the test of decision 13 runs against a local build of the same
+    commit.

@@ -145,8 +145,8 @@ here.
 
 | Submodule | Fork of | Pinned at | Behind upstream on 2026-11-23 |
 |---|---|---|---|
-| `ceph-provider` | [ceph-provider](https://github.com/ironcore-dev/ceph-provider) | `4c61421`, v0.7.0 plus 3 commits | 21 commits |
-| `go-ceph` | [go-ceph](https://github.com/ceph/go-ceph) | `e7e4b0b`, v0.41.0 | 77 commits |
+| `ceph-provider` | [ceph-provider](https://github.com/ironcore-dev/ceph-provider) | `8f93bdc`, which is `4c61421` (v0.7.0 plus 3 commits) plus one commit of the lab | 21 commits |
+| `go-ceph` | [go-ceph](https://github.com/ceph/go-ceph) | `e0f6508`, which is `e7e4b0b` (v0.41.0) plus one commit of the lab | 77 commits |
 
 Nothing keeps a fork or a pin in step with upstream. They fall behind
 unless someone moves them, and a fix that upstream made after the pin is
