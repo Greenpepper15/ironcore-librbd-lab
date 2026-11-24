@@ -23,6 +23,7 @@
 |---|---|
 | ironcore-in-a-box | submodule `ironcore-in-a-box`, pinned at `8263add` |
 | ceph-provider source | submodule `ceph-provider`, a fork of ceph-provider, pinned at `4c61421` (v0.7.0 plus 3 commits), decision 11 |
+| go-ceph source | submodule `go-ceph`, a fork of go-ceph, pinned at `e7e4b0b` (v0.41.0), decision 12 |
 | IronCore components | [ironcore](https://github.com/ironcore-dev/ironcore), [ceph-provider](https://github.com/ironcore-dev/ceph-provider), [libvirt-provider](https://github.com/ironcore-dev/libvirt-provider); local checkouts are named in `lab.env` |
 | Ceph image recipes of Clyso's build system | [cbs-components](https://github.com/clyso/cbs-components) |
 | Stand-in for the build under test | `quay.io/ceph/ceph:v21.2.0`, RPMs at `https://download.ceph.com/rpm-21.2.0/el10` |

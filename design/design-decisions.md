@@ -368,8 +368,68 @@ Checked on 2026-11-23 on the Linux test host. The tree of the submodule at
 cache. The provider binary in that image has the same SHA-256 and size as
 the one in the image that the lab runs with the second build under test.
 With an empty directory as source the script stops with the hint to fetch
-the submodule. Not run: a clone from nothing with `--recurse-submodules`,
-and a host that has a directory `ceph-provider` in the clone already.
+the submodule. A clone from nothing with `--recurse-submodules` brought the
+submodule at `4c61421` with the same tree, and the build script found the
+source in it. Not run: a host that has a directory `ceph-provider` in the
+clone already.
+
+## 12. The provider is built with go-ceph from a submodule, a fork that takes the new bindings
+
+**Problem.** The provider calls librbd through go-ceph, in the version its
+`go.mod` names. A librbd call that only the build under test has is in no
+go-ceph release, and its binding compiles only where the header of that
+build is, which is the image build of the lab (TODO 6).
+
+Example. The build under test has a keyslot call in `librbd.h`. go-ceph
+v0.41.0, which the provider names, has `EncryptionFormat` and
+`EncryptionLoad` and nothing for keyslots, so the provider cannot call it.
+
+**Why.** With go-ceph as a pinned submodule the source of a binding is in
+the clone, and the image build takes go-ceph from there. A binding can be
+changed and built without a push and without a release. The submodule
+points at a fork of go-ceph, so a set of bindings is a branch there and a
+new pin here, the way decision 11 does it for the provider. `GO_CEPH_DIR`
+names a checkout of one's own and wins when it is set.
+
+**Alternatives that lost.**
+- The fork named in the `go.mod` of the provider, with a `replace` line.
+  A provider branch then builds anywhere. But every change to a binding
+  has to be pushed to the fork, and the `go.mod` of the provider moved,
+  before it compiles for the first time.
+- A cgo file in the provider for the new calls. No second repository, but
+  the bindings then sit apart from the encryption calls that go-ceph has,
+  and would have to be moved to be offered to go-ceph. It stays an option
+  for calls outside librbd (TODO 6).
+
+**What we accept.** The lab builds the provider from two forks. Nothing
+keeps a fork or a pin in step with upstream, so both fall behind unless
+someone moves them (TODO 15). A provider branch that calls a new binding
+builds in the lab only, until its `go.mod` names the fork as well. Two
+places can name a go-ceph version, the pin here and the `go.mod` of the
+provider, and in the lab the pin wins. A go-ceph commit that needs other
+modules than the version in `go.mod` stops the build, because the `go.sum`
+of the provider is not written anew.
+
+**Implementation.** Submodule `go-ceph`, its URL is in `.gitmodules`,
+pinned at `e7e4b0b`, the commit of v0.41.0.
+`hack/build-ceph-volume-provider.sh` hands the directory to the image
+build as the named build context `go-ceph`.
+`images/ceph-volume-provider/Dockerfile` copies it to `/go-ceph` and
+points the module at it with `go mod edit -replace`, before the modules
+are fetched. `lab` mounts `GO_CEPH_DIR` and passes it on.
+
+Checked on 2026-11-23 on the Linux test host. With `GO_CEPH_DIR` unset,
+`./lab build-ceph-volume-provider` printed `go-ceph source: /lab/go-ceph`
+and built the provider for the second build under test, x86_64 under
+emulation, in 7.5 minutes, 7 of them in the Go build. The build
+information of the binary names go-ceph as `v0.41.0 => /go-ceph`, where
+the binary that the lab runs names the released module with its checksum.
+The new binary links the librbd of the image and starts. `go.sum` needed
+no change. The same was run before on the stand-in image without
+emulation, in 64 s. With an empty directory as go-ceph source the script
+stops with the hint to fetch the submodule. Not run: a deploy of such an
+image, a go-ceph commit other than v0.41.0, and a clone from nothing with
+both submodules.
 
 ## TODO
 
@@ -508,8 +568,12 @@ Deferred work and open questions. Numbers stay.
    to another group, and `docker` in the toolbox would then be refused.
    `./lab shell` followed by `docker version` shows it.
 6. **go-ceph bindings for new librbd calls.** A prototype that adds C calls
-   needs them in Go. Open whether through a go-ceph fork named in the
-   provider's `go.mod` or a small cgo file in the provider.
+   needs them in Go. Decided on 2026-11-23: they go to the go-ceph fork
+   that the provider is built with (decision 12). No binding is written
+   yet. A small cgo file in the provider stays an option for calls outside
+   librbd, for example a wrapper around libcryptsetup. The stand-in image
+   has `cryptsetup-libs` 2.8.1, which its librbd links. Not looked at: the
+   header package that a build against it needs.
 7. **Variants that need privileges in the provider pod.** Mapping an image
    with krbd or rbd-nbd inside the pod needs a privileged container and
    kernel modules on the laptop. Not prepared.
@@ -695,3 +759,17 @@ Deferred work and open questions. Numbers stay.
     Open. Which way, and which cost. How librbd tells format options with
     the new fields from the ones that callers pass today. For the second
     way an attach through QEMU's librbd 18.2.7 and the same on a clone.
+
+15. **The forks fall behind upstream.** The provider and go-ceph come from
+    forks (decisions 11 and 12), and nothing moves a fork or a pin when
+    upstream moves.
+
+    Example. On 2026-11-23 the pin of ceph-provider was 21 commits behind
+    upstream `main`, and the pin of go-ceph 77 commits behind upstream
+    `master`. go-ceph has released v0.42.0 and v0.42.1 since that pin. A
+    fix from those is not in a provider built here.
+
+    Open. Who moves the pins and when, for example with each new build
+    under test. Whether a prototype branch is rebased on upstream before
+    it is shown to anyone. Whether the lab should say so when a pin is
+    behind.

@@ -5,15 +5,19 @@ set -euo pipefail
 
 LAB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
-# The source is the pinned submodule unless lab.env names another checkout
-# (design decision 11).
+# The sources are the pinned submodules unless lab.env names other checkouts
+# (design decisions 11 and 12).
 CEPH_PROVIDER_DIR=${CEPH_PROVIDER_DIR:-$LAB_DIR/ceph-provider}
-if [ ! -f "$CEPH_PROVIDER_DIR/go.mod" ]; then
-    echo "no ceph-provider source in $CEPH_PROVIDER_DIR. For the submodule run on the host:" >&2
-    echo "  git submodule update --init ceph-provider" >&2
-    exit 1
-fi
-echo "ceph-provider source: $CEPH_PROVIDER_DIR"
+GO_CEPH_DIR=${GO_CEPH_DIR:-$LAB_DIR/go-ceph}
+for src in "ceph-provider=$CEPH_PROVIDER_DIR" "go-ceph=$GO_CEPH_DIR"; do
+    name=${src%%=*} dir=${src#*=}
+    if [ ! -f "$dir/go.mod" ]; then
+        echo "no $name source in $dir. For the submodule run on the host:" >&2
+        echo "  git submodule update --init $name" >&2
+        exit 1
+    fi
+    echo "$name source: $dir"
+done
 : "${CEPH_IMAGE:?set CEPH_IMAGE to the Ceph container image to build against}"
 : "${CEPH_REPO_URL:?set CEPH_REPO_URL to the RPM repository of the same Ceph build}"
 image=${CEPH_VOLUME_PROVIDER_IMAGE:?set CEPH_VOLUME_PROVIDER_IMAGE to the tag to build, e.g. lab/ceph-volume-provider:dev}
@@ -32,6 +36,7 @@ fi
 
 docker build "${platform[@]}" \
     -f "$LAB_DIR/images/ceph-volume-provider/Dockerfile" \
+    --build-context "go-ceph=$GO_CEPH_DIR" \
     --build-arg "CEPH_IMAGE=$CEPH_IMAGE" \
     --build-arg "CEPH_REPO_URL=$CEPH_REPO_URL" \
     --build-arg "CEPH_REPO_GPGKEY=${CEPH_REPO_GPGKEY:-}" \

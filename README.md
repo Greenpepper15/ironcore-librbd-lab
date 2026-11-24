@@ -111,9 +111,11 @@ CEPH_REPO_GPGKEY=<its signing key, or empty>
 CEPH_VOLUME_PROVIDER_IMAGE=lab/ceph-volume-provider:dev
 ```
 
-The provider is built from the submodule `ceph-provider`, which the lab pins
-to the commit it was run with. To build from a checkout of your own, add
-`CEPH_PROVIDER_DIR=/path/to/ceph-provider`.
+The provider is built from two submodules, `ceph-provider` and `go-ceph`
+(the Go bindings for librbd), which the lab pins to the commits it was run
+with. To build from checkouts of your own, add
+`CEPH_PROVIDER_DIR=/path/to/ceph-provider` or
+`GO_CEPH_DIR=/path/to/go-ceph`.
 
 If the image needs a login, run `docker login` and `docker pull` for it on
 the host first. The build then uses the local copy.
@@ -131,8 +133,32 @@ Then:
 under test can be tried this way against an image that a VM has open, before
 any Go code exists.
 
-After a change in the provider source, repeat `build-ceph-volume-provider`
-and `deploy`. The VM keeps running while the provider is replaced.
+After a change in the provider source or in go-ceph, repeat
+`build-ceph-volume-provider` and `deploy`. The VM keeps running while the
+provider is replaced.
+
+### The provider sources are forks
+
+Both submodules point at forks, not at the upstream repositories. Their
+URLs are in `.gitmodules`. A prototype is a branch on a fork and a new pin
+here.
+
+| Submodule | Fork of | Pinned at | Behind upstream on 2026-11-23 |
+|---|---|---|---|
+| `ceph-provider` | [ceph-provider](https://github.com/ironcore-dev/ceph-provider) | `4c61421`, v0.7.0 plus 3 commits | 21 commits |
+| `go-ceph` | [go-ceph](https://github.com/ceph/go-ceph) | `e7e4b0b`, v0.41.0 | 77 commits |
+
+Nothing keeps a fork or a pin in step with upstream. They fall behind
+unless someone moves them, and a fix that upstream made after the pin is
+missing in a provider built here. go-ceph, for example, has released
+v0.42.0 and v0.42.1 since its pin. To see how far a pin is behind:
+
+```sh
+git -C go-ceph fetch -q https://github.com/ceph/go-ceph.git master
+git -C go-ceph rev-list --count HEAD..FETCH_HEAD
+```
+
+See TODO 15 in `design/design-decisions.md`.
 
 ### A build for another architecture than the host
 
@@ -202,7 +228,7 @@ flags) is not covered yet, see TODO in `design/design-decisions.md`.
 | `./lab up` | cluster, IronCore, networking, libvirt-provider, Rook Ceph, volume provider |
 | `./lab up-ironcore` | the same without storage |
 | `./lab up-storage` | Rook Ceph and the volume provider |
-| `./lab build-ceph-volume-provider` | provider image from the `ceph-provider` submodule, or `CEPH_PROVIDER_DIR`, against `CEPH_IMAGE` |
+| `./lab build-ceph-volume-provider` | provider image from the `ceph-provider` and `go-ceph` submodules, or `CEPH_PROVIDER_DIR` and `GO_CEPH_DIR`, against `CEPH_IMAGE` |
 | `./lab deploy` | roll out the images named in `lab.env` |
 | `./lab status` | librbd versions and deployed images |
 | `./lab kubectl ...` | kubectl against the lab cluster |
@@ -224,6 +250,7 @@ hack/                scripts behind the targets
 examples/            a VM with an encrypted data volume
 ironcore-in-a-box/   submodule, pinned
 ceph-provider/       submodule, pinned, source of the provider image
+go-ceph/             submodule, pinned, Go bindings for librbd in that image
 design/              why the lab is built this way, what was checked
 ```
 

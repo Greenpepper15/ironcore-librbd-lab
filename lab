@@ -51,12 +51,12 @@ if docker network inspect kind >/dev/null 2>&1; then
 fi
 
 # Local checkouts named in lab.env are mounted at the same path.
-for dir in "${CEPH_PROVIDER_DIR:-}" "${LIBVIRT_PROVIDER_DIR:-}" "${IRONCORE_DIR:-}"; do
+for dir in "${CEPH_PROVIDER_DIR:-}" "${GO_CEPH_DIR:-}" "${LIBVIRT_PROVIDER_DIR:-}" "${IRONCORE_DIR:-}"; do
     [ -n "$dir" ] && args+=(-v "$dir:$dir")
 done
 
 # Pass the lab settings through.
-for var in $(compgen -v | grep -E '^(CEPH_|LIBVIRT_PROVIDER_|IRONCORE_|VOLUMEPOOLLET_|MACHINEPOOLLET_|LAB_|KIND_CLUSTER_NAME)' || true); do
+for var in $(compgen -v | grep -E '^(CEPH_|GO_CEPH_|LIBVIRT_PROVIDER_|IRONCORE_|VOLUMEPOOLLET_|MACHINEPOOLLET_|LAB_|KIND_CLUSTER_NAME)' || true); do
     args+=(-e "$var")
 done
 

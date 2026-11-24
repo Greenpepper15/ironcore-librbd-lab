@@ -1,9 +1,10 @@
 # syntax=docker/dockerfile:1
 # ceph-volume-provider linked against the librbd of a given Ceph image.
 #
-# The build context is a ceph-provider checkout. CEPH_IMAGE is an RPM based
-# Ceph container image (el9 or el10), CEPH_REPO_URL the RPM repository of the
-# same build, which supplies the matching -devel packages.
+# The build context is a ceph-provider checkout, the named build context
+# "go-ceph" a go-ceph checkout. CEPH_IMAGE is an RPM based Ceph container
+# image (el9 or el10), CEPH_REPO_URL the RPM repository of the same build,
+# which supplies the matching -devel packages.
 #
 # The upstream Dockerfile copies Debian libraries into a distroless image and
 # cannot take RPM builds. Here the Ceph image itself is the runtime base, so
@@ -43,6 +44,10 @@ ENV PATH=/usr/local/go/bin:$PATH GOTOOLCHAIN=local
 
 WORKDIR /workspace
 COPY go.mod go.sum ./
+# go-ceph comes from the checkout, not from the version go.mod names, so that
+# bindings for new librbd calls build without a release (design decision 12).
+COPY --from=go-ceph . /go-ceph
+RUN go mod edit -replace github.com/ceph/go-ceph=/go-ceph
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/root/go/pkg \
     go mod download

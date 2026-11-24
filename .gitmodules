@@ -4,3 +4,6 @@
 [submodule "ceph-provider"]
 	path = ceph-provider
 	url = https://github.com/Greenpepper15/ceph-provider.git
+[submodule "go-ceph"]
+	path = go-ceph
+	url = https://github.com/Greenpepper15/go-ceph.git
