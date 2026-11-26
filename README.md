@@ -139,14 +139,16 @@ provider is replaced.
 
 ### The provider sources are forks
 
-Both submodules point at forks, not at the upstream repositories. Their
-URLs are in `.gitmodules`. A prototype is a branch on a fork and a new pin
-here.
+Both submodules point at forks, not at the upstream repositories. So
+does a third one, `ironcore`, the source of the machinepoollet image
+(see "Changing other IronCore components"). Their URLs are in
+`.gitmodules`. A prototype is a branch on a fork and a new pin here.
 
 | Submodule | Fork of | Pinned at | Behind upstream on 2026-11-26 |
 |---|---|---|---|
 | `ceph-provider` | [ceph-provider](https://github.com/ironcore-dev/ceph-provider) | `463eacd`, which is `main` of 2026-11-24 (`67212d3`) plus 13 commits for the rotation | 0 commits |
 | `go-ceph` | [go-ceph](https://github.com/ceph/go-ceph) | `128f391`, which is `e7e4b0b` (v0.41.0) plus two commits of the lab | 77 commits |
+| `ironcore` | [ironcore](https://github.com/ironcore-dev/ironcore) | `f26f6b7`, which is v0.6.1 (`ee24604`) plus two commits for the rotation, branch `key-rotation-live-v0.6.1` (decision 17) | 32 commits |
 
 Nothing keeps a fork or a pin in step with upstream. They fall behind
 unless someone moves them, and a fix that upstream made after the pin is
@@ -209,7 +211,7 @@ Dockerfile of its repository, name it in `lab.env`, run `./lab deploy`.
 |---|---|---|
 | `CEPH_VOLUME_PROVIDER_IMAGE` | ceph-volume-provider | `./lab build-ceph-volume-provider` |
 | `VOLUMEPOOLLET_IMAGE` | volumepoollet | ironcore, `docker build --target volumepoollet` |
-| `MACHINEPOOLLET_IMAGE` | machinepoollet | ironcore, `docker build --target machinepoollet` |
+| `MACHINEPOOLLET_IMAGE` | machinepoollet | `./lab build-machinepoollet`, from the `ironcore` submodule or `IRONCORE_DIR` |
 | `IRONCORE_APISERVER_IMAGE` | ironcore-apiserver | ironcore, `docker build --target apiserver` |
 | `IRONCORE_CONTROLLER_MANAGER_IMAGE` | ironcore-controller-manager | ironcore, `docker build --target manager` |
 | `LIBVIRT_PROVIDER_IMAGE` | libvirt-provider | libvirt-provider, `docker build` |
@@ -221,6 +223,10 @@ tag made from its image ID. A rebuild therefore always rolls out, and
 Only the images are replaced. A change to the manifests of a component (RBAC,
 flags) is not covered yet, see TODO in `design/design-decisions.md`.
 
+The settings for a passphrase rotation through the Volume API are at the
+end of `lab.env.example`. What they bring in and what was run with them
+is in decisions 16 and 17 of `design/design-decisions.md`.
+
 ## Commands
 
 | Command | What it does |
@@ -229,6 +235,7 @@ flags) is not covered yet, see TODO in `design/design-decisions.md`.
 | `./lab up-ironcore` | the same without storage |
 | `./lab up-storage` | Rook Ceph and the volume provider |
 | `./lab build-ceph-volume-provider` | provider image from the `ceph-provider` and `go-ceph` submodules, or `CEPH_PROVIDER_DIR` and `GO_CEPH_DIR`, against `CEPH_IMAGE` |
+| `./lab build-machinepoollet` | machinepoollet image from the `ironcore` submodule, or `IRONCORE_DIR` |
 | `./lab deploy` | roll out the images named in `lab.env` |
 | `./lab status` | librbd versions and deployed images |
 | `./lab kubectl ...` | kubectl against the lab cluster |
@@ -251,6 +258,7 @@ examples/            a VM with an encrypted data volume
 ironcore-in-a-box/   submodule, pinned
 ceph-provider/       submodule, pinned, source of the provider image
 go-ceph/             submodule, pinned, Go bindings for librbd in that image
+ironcore/            submodule, pinned, source of the machinepoollet image
 design/              why the lab is built this way, what was checked
 ```
 

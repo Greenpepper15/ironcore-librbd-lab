@@ -1,5 +1,11 @@
 # What IronCore needs for a passphrase rotation
 
+Written before the lab followed a branch where the Volume names a new
+Secret instead of the Secret changing (decisions 16 and 17 of
+`design-decisions.md`). The changes of points 1 and 4 watch the Secret,
+which the lab does not do. That branch covers points 2 and 3, decision 17
+the update in place of point 4, and points 5 and 6 still hold.
+
 Short answer. Today IronCore cannot rotate the passphrase of an encrypted
 Volume. Nothing notices that the Secret changed, the volume runtime
 interface has no call for it, and the provider has no code that touches a

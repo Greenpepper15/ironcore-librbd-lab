@@ -14,7 +14,10 @@
       a Mac with the upstream provider image and with the first build under
       test, x86_64 through Rosetta ("macOS" below). Open: WSL2
 - [ ] 7. First rotation variant end to end: Go binding, call in the provider, new
-      passphrase on the VM side (TODO 6)
+      passphrase on the VM side (TODO 6). Run on 2026-11-25 through the
+      Volume API, on a Volume attached to the running VM (decisions 16 and
+      17). Open: a rotation while the guest writes, a cold start of the VM
+      after a rotation
 - [ ] 8. Proposals to ironcore-in-a-box (TODO 9)
 
 ## Where things live
@@ -24,6 +27,7 @@
 | ironcore-in-a-box | submodule `ironcore-in-a-box`, pinned at `8263add` |
 | ceph-provider source | submodule `ceph-provider`, a fork of ceph-provider, pinned at `463eacd` (`main` of 2026-11-24 plus 13 commits for the rotation), decisions 11 and 16 |
 | go-ceph source | submodule `go-ceph`, a fork of go-ceph, pinned at `128f391` (v0.41.0 plus the binding of decisions 13 and 15), decision 12 |
+| ironcore source | submodule `ironcore`, a fork of ironcore, pinned at `f26f6b7` (v0.6.1 plus two commits for the rotation, branch `key-rotation-live-v0.6.1`), source of the machinepoollet image, decision 17 |
 | IronCore side of a rotation | images `ironcore-apiserver` and `ironcore-volumepoollet` of the branch that decision 16 names |
 | IronCore components | [ironcore](https://github.com/ironcore-dev/ironcore), [ceph-provider](https://github.com/ironcore-dev/ceph-provider), [libvirt-provider](https://github.com/ironcore-dev/libvirt-provider); local checkouts are named in `lab.env` |
 | Ceph image recipes of Clyso's build system | [cbs-components](https://github.com/clyso/cbs-components) |

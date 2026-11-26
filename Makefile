@@ -67,6 +67,10 @@ down: ## Delete the cluster and release the loop device
 build-ceph-volume-provider: ## Build the volume provider from the ceph-provider and go-ceph submodules against CEPH_IMAGE
 	hack/build-ceph-volume-provider.sh
 
+.PHONY: build-machinepoollet
+build-machinepoollet: ## Build machinepoollet from the ironcore submodule
+	hack/build-machinepoollet.sh
+
 .PHONY: deploy
 deploy: ## Load the images named in lab.env into the cluster and roll them out
 	hack/apply-overrides.sh ironcore libvirt-provider ceph-volume-provider

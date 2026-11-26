@@ -964,6 +964,154 @@ Not run: a rotation while the guest writes to the disk, a cold start of
 the VM after a rotation, the provider at a memory limit below 2Gi, and
 the two cases marked "not run" above.
 
+## 17. The ironcore source is a submodule, a fork with one change to machinepoollet on v0.6.1, and the lab builds machinepoollet from it
+
+**Problem.** machinepoollet hands the passphrase of an encrypted Volume to
+the machine runtime when the volume is attached. When the Volume names a
+new Secret, machinepoollet finds that the passphrase differs from the one
+the runtime holds, and it detaches the volume and attaches it again
+(TODO 11, point 4 of `ironcore-rotation-gaps.md`). The disk leaves the
+running VM.
+
+Example. On 2026-11-25 a Volume that was attached to the running VM was
+pointed at a new Secret, with machinepoollet v0.6.1. machinepoollet logged
+"Detaching outdated IRI volume" within 2 s. The disk `vdc` was out of
+the domain for about 30 s, until libvirt-provider attached it again at
+its next resync. The VM does not need this. QEMU got the volume
+key at attach and keeps working with it (decision 3).
+
+**Why.** machinepoollet can update a volume of a machine in place, and
+does so for a changed size. One more case sends a changed passphrase the
+same way
+([`machine_controller_volume.go:373`](https://github.com/Greenpepper15/ironcore/blob/f26f6b7608cda69b858f99586161bfd065a46cd9/poollet/machinepoollet/controllers/machine_controller_volume.go#L373-L388)),
+13 added lines. libvirt-provider v0.5.0 needs no change for it. Read in
+its code, its update call stores the new passphrase and leaves the disk
+in the domain.
+
+The change is in no release and in no published image, so the lab needs
+the source. It gets it the way decisions 11 and 12 do it for the
+provider: a fork as a submodule, a branch there, a pin here, and a
+target that builds the image.
+
+The change sits on two branches of the fork. `key-rotation-live` has it
+on top of the branch of decision 16, so both can be offered to ironcore
+together. `key-rotation-live-v0.6.1` has the same commit on v0.6.1, and
+the lab pins that one. Below it sits the validation part of the branch
+of decision 16, which lets a Volume change its `spec.encryption`. The
+new spec needs it, and the apiserver of the lab has it already.
+machinepoollet of the newer source does not fit the machine runtime of
+the lab, libvirt-provider v0.5.0. In the lab it reconciled the Machine
+5 times per second, and it and apinetlet overwrote each other's status
+of the NetworkInterface (implementation note).
+
+**Alternatives that lost.**
+- The pin at `key-rotation-live`. Its image ran in the lab on 2026-11-26
+  with the result above.
+- The pin at `key-rotation-live`, and the build script puts the change on
+  the v0.6.1 source. The image would then come from a source the pin does
+  not name.
+- A newer machine runtime, libvirt-provider v0.6.0. Not tried, and it
+  replaces a second component of the lab (TODO 18).
+- The machinepoollet image of the branch of decision 16. It does not have
+  the change.
+- The change kept in the lab as a patch for the release source. It could
+  then not go to ironcore as a commit.
+- No change, and a rotation only for volumes that no running VM uses. A
+  data disk of a long-running VM is the case a rotation is for.
+
+**What we accept.**
+- machinepoollet passes the new passphrase on as soon as the Volume names
+  the new Secret. In the run that was 7 s before the header had a keyslot
+  for it. A VM that starts in between would get a passphrase that opens
+  nothing yet. Not run. Closing it needs a field that says which
+  passphrase the header accepts (point 6 of `ironcore-rotation-gaps.md`).
+- Read in the code of libvirt-provider v0.5.0, not run: the libvirt
+  secret of the disk keeps the old passphrase while the domain runs. A
+  cold start builds the domain anew with the stored, new one.
+- A third fork that nothing keeps in step with upstream (TODO 15).
+- The same change on two branches. A fix to it has to go to both, with
+  `git cherry-pick -x`. The v0.6.1 branch also carries a part of
+  another person's commit, picked by hand.
+- The lab mixes versions. machinepoollet is v0.6.1 with the change, the
+  apiserver and volumepoollet come from the branch of decision 16, 35
+  commits after v0.6.1. The rotation of 2026-11-25 ran with this mix.
+
+**Implementation.** Submodule `ironcore`, its URL is in `.gitmodules`,
+pinned at `f26f6b7`, the tip of the branch `key-rotation-live-v0.6.1` of
+the fork. On top of v0.6.1 (`ee24604`) it has two commits. `7ba6db2` is
+the validation part of `74e32c1` of the branch of decision 16, with its
+author kept. `f26f6b7` is the change, picked from `852fee9` of
+`key-rotation-live` with `git cherry-pick -x`. A fix to the change goes
+to both branches. `hack/build-machinepoollet.sh` builds the target
+`machinepoollet` of the Dockerfile in that source as `MACHINEPOOLLET_IMAGE`, and
+`./lab build-machinepoollet` runs it. `IRONCORE_DIR` in `lab.env` names a
+checkout of one's own and wins when it is set.
+
+The commit adds a spec to `machine_controller_test.go`. A machine has two
+volumes, the Secret of the first changes, and the runtime has to list the
+volumes in the order of before. A detach and attach moves the volume to
+the end of the list.
+
+Checked on 2026-11-25 on the Linux test host. The new spec and the spec
+for a changed size passed in 52 s. With the change taken out the new spec
+failed, the volume had moved.
+
+Run in the lab on the same day, with the change applied to the source of
+v0.6.1 and that image in place of machinepoollet v0.6.1. The swap itself
+left the three disks and the interface of the VM alone. Then the attached
+Volume of the example was pointed at a third Secret. machinepoollet logged
+"Updating volume" 2 s later, the provider added the new keyslot after 9 s
+and removed the old one after 16 s. The domain had its three disks and
+its interface at every sample for four minutes, one sample each 3 s, and
+libvirt-provider logged no detach.
+
+On 2026-11-26 `./lab build-machinepoollet` built the image from
+`852fee9`, the tip of `key-rotation-live` and the first pin of this
+decision, in 4 min 26 s on the Linux test host. That image ran in the
+lab for three minutes. The VM kept its three disks and its interface, and
+machinepoollet logged no error and left the three volumes as they were.
+But it reconciled the Machine 5 times per second, 707 times in 142 s.
+The image with the change on v0.6.1 did not reconcile the idle Machine
+once in the 43 s after it was back. The status of the NetworkInterface of
+the VM was seen once without its address and its virtual IP and had both
+again 6 s later. apinetlet, which writes that status too, logged about
+1300 lines per minute while the image ran and none before or after. So
+the two overwrite each other.
+
+This fits the code. Since a commit between v0.6.1 and `852fee9`
+([`6ec7ff2`](https://github.com/ironcore-dev/ironcore/commit/6ec7ff227ec32b4bc2c4125f4e6329219f846267))
+machinepoollet writes the status of a NetworkInterface from what the
+machine runtime reports, and it clears the addresses that the runtime
+does not report
+([`machine_controller_networkinterface.go:531`](https://github.com/Greenpepper15/ironcore/blob/852fee92b293aae7bccb6d316a0ad2a03aba7429/poollet/machinepoollet/controllers/machine_controller_networkinterface.go#L531)).
+libvirt-provider v0.5.0 is older than that commit and reports none. The
+lab went back to the image with the change on the source of v0.6.1. No
+rotation was run with the image from `852fee9`. So the pin moved to the
+second branch.
+
+Checked on 2026-11-26 on that branch, in a `golang:1.27.1` container with
+envtest 1.36.0. With the change alone on v0.6.1 the new spec stopped at
+the step that points the Volume at the new Secret. The apiserver of
+v0.6.1 refused that, because `spec.encryption` is immutable there. With the
+validation commit below the change, both specs passed in 47 s, and so
+did the tests of the validation package. With the change taken out the
+new spec failed, the volume had moved. machinepoollet does not import
+the validation package. `./lab build-machinepoollet` built the image
+from the pin in 3 min 46 s, and its binary `/machinepoollet` is byte for
+byte the one of the image that ran the rotation of 2026-11-25. So that
+run holds for this pin.
+
+The image from the pin then ran in the lab on 2026-11-26. The swap left
+the three disks, the interface and the status of the NetworkInterface as
+they were, and machinepoollet reconciled the Machine 8 times in the
+120 s after it. Then the attached Volume of the example was pointed at a
+fourth Secret. machinepoollet logged "Updating volume" 1 s later, the
+provider added the new keyslot after 8 s and removed the old one after
+15 s, and libvirt-provider logged no detach. The new Secret opened the
+header and the old one did not. The domain kept its disks and its
+interface, and the status of the NetworkInterface did not change, at
+every sample for four minutes.
+
 ## TODO
 
 Deferred work and open questions. Numbers stay.
@@ -1175,6 +1323,11 @@ Deferred work and open questions. Numbers stay.
     volume key it has, and machinepoollet carries a note for an update in
     place
     ([`:372`](https://github.com/ironcore-dev/ironcore/blob/ee24604077faa679d6e22b06c543ca0a578b5db7/poollet/machinepoollet/controllers/machine_controller_volume.go#L372)).
+
+    Run on 2026-11-25: the disk does not have to leave the VM. With the
+    change of decision 17 machinepoollet passes the new passphrase on in
+    place. The order of the steps is still open, see "What we accept"
+    there.
 12. **Image build time under emulation.** With `CEPH_PLATFORM` the whole
     image build is emulated, and the Go compile of the provider took 48
     minutes on the test host, against under 5 minutes natively. Idea, not
@@ -1307,6 +1460,11 @@ Deferred work and open questions. Numbers stay.
     it is shown to anyone. Whether the lab should say so when a pin is
     behind.
 
+    Since decision 17 there is a third fork, ironcore. On 2026-11-26 the
+    pin of ceph-provider was level with its upstream `main`, the pin of
+    ironcore 32 commits behind (it is v0.6.1 with two commits), and the
+    pin of go-ceph still 77 commits behind.
+
 16. **The test of a binding against the packaged build.** go-ceph runs
     its tests in a container of its own, on the Ceph image that
     `CEPH_IMG` and `CEPH_TAG` name
@@ -1354,3 +1512,17 @@ Deferred work and open questions. Numbers stay.
     The same order in the commit of the session would turn a stopped
     removal into a wiped keyslot that is still listed, and a stopped add
     into no change. Not built, not tested.
+18. **A newer machine runtime, and one branch for the machinepoollet
+    change.** The lab pins the change on v0.6.1, because machinepoollet
+    of a newer ironcore and libvirt-provider v0.5.0 overwrite the status
+    of the NetworkInterface (decision 17).
+
+    Read on GitHub on 2026-11-26, not run. libvirt-provider v0.6.0 of
+    2026-11-04 builds against ironcore v0.9.0, and v0.9.0 is the first
+    ironcore tag with the commit that writes that status from the
+    runtime (`6ec7ff2`). Whether v0.6.0 reports the addresses is not
+    checked.
+
+    Open. A lab run with libvirt-provider v0.6.0 and machinepoollet from
+    `key-rotation-live`. If it holds, the lab can pin that branch and the
+    second one can go.
