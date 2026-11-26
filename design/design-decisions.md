@@ -357,7 +357,9 @@ version that ironcore-in-a-box names, v0.6.0, while the source is 16
 commits newer (TODO 2).
 
 **Implementation.** Submodule `ceph-provider`, its URL is in `.gitmodules`,
-pinned at `4c61421`, and since decision 14 one commit further.
+pinned at `4c61421`, and since decision 14 one commit further. Since
+decision 16 the pin is `463eacd`, on a branch that starts at
+ceph-provider `main` of 2026-11-24.
 `hack/build-ceph-volume-provider.sh` builds from it
 when `CEPH_PROVIDER_DIR` is empty, and says how to fetch it when the
 directory is empty.
@@ -413,7 +415,10 @@ of the provider is not written anew.
 
 **Implementation.** Submodule `go-ceph`, its URL is in `.gitmodules`,
 pinned at `e7e4b0b`, the commit of v0.41.0, and since decision 13 one
-commit further.
+commit further, since decision 15 two (`128f391`). The provider at the
+pin of decision 16 names go-ceph v0.42.1 in its `go.mod`. The lab builds
+it with the fork, which is v0.41.0 plus the two commits, and that
+provider built and ran.
 `hack/build-ceph-volume-provider.sh` hands the directory to the image
 build as the named build context `go-ceph`.
 `images/ceph-volume-provider/Dockerfile` copies it to `/go-ceph` and
@@ -435,6 +440,10 @@ with the same trees, and the build script found both sources in it. Not
 run: a deploy of such an image and a go-ceph commit other than v0.41.0.
 
 ## 13. The header session gets a thin go-ceph binding behind a build tag of its own, and the caller decides how the lock is held
+
+**Revised in part by decision 15.** The binding gives the path of the
+staged header, `Path()`, in place of the descriptor number, `Fd()`. The
+lock and the build tag are as decided here.
 
 **Problem.** The second build under test can hand out the LUKS header of
 an image as a file. librbd stages a copy and returns a file descriptor,
@@ -568,6 +577,11 @@ against the packaged build (TODO 16).
 
 ## 14. The provider gets a small cgo package for libcryptsetup, with the calls of a rotation and nothing that orders them
 
+**Revised in part by decisions 15 and 16.** The test on an RBD image
+moved to the package of decision 15. Since decision 16 the provider
+imports the package, and the image build of the lab installs the header
+package, see the last paragraph of the implementation note.
+
 **Problem.** With the header session (decision 13) librbd hands out the
 LUKS header as a file, and the caller changes the keyslots in it with
 libcryptsetup. The provider is written in Go and has no code that calls
@@ -656,6 +670,299 @@ the provider pod while a VM wrote to the image (`development.md`, "Go
 bindings under a writing VM"): a keyslot added and one removed, with the
 cost as set. Not run: the provider pod at a memory limit below 2Gi, and a
 LUKS1 header.
+
+Since 2026-11-25 `images/ceph-volume-provider/Dockerfile` installs
+`cryptsetup-devel` in its build stage, from the CRB repository of the
+distribution. The first image build of a provider that imports the
+package had stopped with `libcryptsetup.h: No such file or directory`.
+With the package, `cryptsetup-devel-2.8.6-2.el10`, the build passed in
+5 min 44 s, x86_64 under emulation. The Dockerfile of ceph-provider is
+unchanged.
+
+## 15. The binding gives the path of the staged header, and one provider package joins the binding and the libcryptsetup package
+
+**Problem.** The binding of decision 13 hands out the staged header as a
+descriptor number, and the package of decision 14 opens a path. Code that
+changes a header has to turn the one into the other, and it has to keep
+three rules that nothing checks (decision 13, "What we accept"). The code
+that orders a rotation should see none of this. And the libcryptsetup
+package should stay free of librbd, as decision 14 has it.
+
+Example. The test of decision 14 and the check program of the lab each
+contain the line
+`cryptsetup.Open(fmt.Sprintf("/proc/self/fd/%d", hdr.Fd()))`. The
+rotation code would hold the third copy. A caller that keeps the number
+after `Close` can name another file with it, and a caller that wraps it
+in an `os.File` closes it twice.
+
+**Why.** Each layer keeps what belongs to it, in three small changes.
+
+```
+rotation code                    the image and the passphrases
+   |  luksheader.Change(img, change)
+   v
+internal/luksheader              the order of the steps and the lock
+   |  hdr.Path()            |  cryptsetup.Open(path)
+   v                        v
+go-ceph binding            internal/cryptsetup
+   the descriptor             any file with a LUKS header
+   |                        |
+   v                        v
+librbd                     libcryptsetup
+```
+
+The binding gives a path. `Path()` takes the place of `Fd()` and returns
+`/proc/self/fd/<fd>`. That librbd hands out the header as a descriptor of
+a file without a name is a detail of librbd, and its Go binding is the
+place for it. The number is not exported any more.
+
+A package `internal/luksheader` in the provider has one function.
+`Change(img, change)` opens the session, opens libcryptsetup on the path,
+runs `change` with the `*cryptsetup.Device`, frees the libcryptsetup
+handle, takes the transient lock, commits, releases the lock and closes
+the session. The three rules of decision 13 are kept in this one place.
+It is the only package that imports both go-ceph and
+`internal/cryptsetup`, and what passes between the two is a string.
+
+librbd marks both descriptors of the staged header as close-on-exec, so a
+process that the caller starts does not inherit the header. Go opens its
+own files that way.
+
+A rotation is two calls of `Change`. The first adds the new keyslot. The
+second checks the new passphrase and removes the old keyslot. Each call
+has a session of its own, so the check reads the header that the image
+stores and not the staged copy of the first call.
+
+The form is a usual one. For a descriptor Go has
+`syscall.RawConn.Control`, which hands it to a function and takes it back
+when the function returns, and the documentation of `os.File.Fd` points
+there. C libraries return the descriptor of an object without a name, as
+`fileno` does, so the calls in `librbd.h` stay as they are.
+
+**Alternatives that lost.**
+- The caller builds the path, as today. Every caller repeats a detail of
+  librbd.
+- `internal/cryptsetup` takes the number. The number stays exported, and
+  the package would learn where its file comes from.
+- `Change` inside `internal/cryptsetup`, or a method of the binding that
+  returns a libcryptsetup handle. Either one ties the two together.
+- librbd returns the path. No call in `librbd.h` returns a path, and C
+  libraries do that for objects with a name of their own, such as a
+  device.
+- librbd takes and returns the header as bytes. The provider would stage
+  its own file and build the same path, and the calls in librbd and the
+  binding would be written again.
+- A named file on tmpfs. Any process of the user can open it by name, and
+  it stays after a crash.
+- One session with two commits for a rotation. The binding still allows
+  it (decision 13), `Change` does not use it.
+
+**What we accept.** A path under `/proc` is still built, in one place,
+and the binding works on Linux only, as the staged file of librbd does.
+A rotation reads the header from the image twice and loads it into
+libcryptsetup twice. `change` can keep the handle it was given; every
+later call on it returns `ErrClosed`. Close-on-exec stops inheritance and
+nothing else: a process of the same user that knows the process ID and
+the number can still open the file. A caller of librbd that wants to run
+the `cryptsetup` program on the file has to pass the descriptor on
+purpose. `Change` always takes the transient lock, and what it does with
+an image without the exclusive-lock feature is open. The pushed commit of
+the binding changes.
+
+**Implementation.**
+- go-ceph fork, branch `luks-header-session`: `Path()` in
+  `rbd/encryption_luks_header.go` returns the path, or
+  `ErrEncryptionLUKSHeaderClosed` after `Close`. `Fd()` is removed, and
+  the two uses in `rbd/encryption_luks_header_test.go` follow.
+- ceph-provider fork, branch `luks-header-rotation`, and since decision
+  16 `luks-header-rotation-iri`: package `internal/luksheader` with
+  `Change`. The test on an RBD image moves there from
+  `internal/cryptsetup/headersession_test.go` and calls it.
+- Lab: `hack/header-session-check/main.go` takes the path from `Path()`.
+  It keeps its own sequence, because it measures the three ways to hold
+  the lock (decision 13).
+- librbd, not done: the close-on-exec flag on the staged file and on its
+  duplicate in `src/librbd/crypto/luks/Header.cc`. It is a patch of three
+  hunks that is not on the Ceph branch, and it needs a new build. The
+  other three changes run against the second build under test.
+
+`TestChange` runs three changes on an image. The first adds a keyslot
+and then fails: the image does not load with the new passphrase, and the
+handle that the function kept answers with `ErrClosed`. The second adds
+the keyslot: the image loads with both passphrases. The third finds the
+new keyslot with its cost in the header that came back from the image,
+checks the new passphrase and removes the old keyslot: the image loads
+with the new passphrase only.
+
+Checked on 2026-11-25 on the Linux test host, natively, with the client
+and the cluster of decision 13. The nine cases of the binding passed in
+40 s, `TestChange` in 32 s, the five tests of the libcryptsetup package
+on a file in 3 s. With `Change` altered to commit a change that failed,
+`TestChange` failed at its first check. `go list -deps -test
+./internal/cryptsetup` names no go-ceph package, and
+`internal/luksheader` with its test is the only package of the provider
+that imports both.
+
+The changed `Header.cc` compiles with the compile command of a local
+build of the same Ceph commit. It was not linked and not run.
+
+A short Python program on the same host, not librbd, showed what the
+flag does. A child process reads a file of this kind through
+`/proc/self/fd/<fd>` when the flag is missing and gets "No such file or
+directory" when it is set. With the flag set the child still reads and
+writes the file through `/proc/<parent>/fd/<fd>`.
+
+The image build of the lab took the changed binding on 2026-11-25, for
+the provider of decision 16. The check program with `Path()` was built
+on 2026-11-26 against both pins, in 1 min 24 s, and not run.
+
+Not run: the check program with the changed binding, `Change` while the
+guest writes to the disk, and a test that a child process of the
+provider does not have the descriptor.
+
+## 16. A rotation starts at the Volume API, and the IronCore side of it comes as two images of the branch that carries it
+
+**Problem.** A user rotates a passphrase by pointing
+`spec.encryption.secretRef` of a Volume at a new Secret. The passphrase in
+the LUKS header has to follow. The provider code of decisions 13 to 15 can
+change the header, and nothing in released IronCore asks it to.
+
+Example. With ironcore v0.6.1 a patch of `secretRef` on an encrypted
+Volume is refused, because the field cannot change after the Volume was
+created
+([`volume.go:126`](https://github.com/ironcore-dev/ironcore/blob/ee24604077faa679d6e22b06c543ca0a578b5db7/internal/apis/storage/validation/volume.go#L126)).
+The interface between volumepoollet and the provider (IRI) has no call
+for a new passphrase either.
+
+**Why.** The missing parts exist as a branch,
+[`key-rotation`](https://github.com/gonzolino/ironcore/tree/206f2c28c9986090ea1a8b4accfd2351552603d6)
+in a fork of ironcore, three commits on ironcore `main` of 2026-11-19. It
+lets `spec.encryption` change, adds the IRI call `RotateVolumeEncryption`,
+and has volumepoollet call it when the Secret of a Volume differs from the
+passphrase that the provider reports. A provider branch of the same fork
+has the handler for the call, and the provider that the lab pins is built
+on that branch.
+
+```
+kubectl patch volume ...          secretRef names the new Secret
+   |
+   v
+ironcore-apiserver                image of the branch, accepts the change
+   |
+   v
+volumepoollet                     image of the branch, sees that the Secret
+   |                              differs from what the provider reports
+   |  IRI RotateVolumeEncryption
+   v
+ceph-volume-provider              built by the lab from the pinned source
+   |  handler                     records the wanted passphrase
+   |  reconcile 1                 luksheader.AddPassphrase, new keyslot
+   |  reconcile 2                 luksheader.RemovePassphrase, old keyslot
+   v
+LUKS header of the RBD image
+```
+
+The fork publishes one image per component of the branch, for both
+architectures. The lab replaces components by image (decision 5), so two
+settings bring the IronCore side in, `IRONCORE_APISERVER_IMAGE` and
+`VOLUMEPOOLLET_IMAGE`, and nothing has to be built for it.
+
+In the provider the handler only records the wanted passphrase
+([`volume_rotate_encryption.go:15`](https://github.com/Greenpepper15/ceph-provider/blob/463eacdc0baf730ad0b397fd515f5668d5b08dbe/internal/volumeserver/volume_rotate_encryption.go#L15)).
+The reconciler changes the header in two runs
+([`image_controller.go:579`](https://github.com/Greenpepper15/ceph-provider/blob/463eacdc0baf730ad0b397fd515f5668d5b08dbe/internal/controllers/image_controller.go#L579)).
+The first adds a keyslot for the wanted passphrase, the second removes
+the keyslot of the one before, and each is one call of the package of
+decision 15. The record of the image lists the passphrases that the
+header accepts, so between the two runs it lists both. The provider
+reports the first of the list to volumepoollet
+([`volume.go:84`](https://github.com/Greenpepper15/ceph-provider/blob/463eacdc0baf730ad0b397fd515f5668d5b08dbe/internal/volumeserver/volume.go#L84)),
+which stops calling once the header has the new passphrase.
+
+**Alternatives that lost.**
+- The two images built from the `ironcore` submodule of decision 17,
+  whose pin holds the same three commits. Nothing would then depend on a
+  registry of someone else. It is two more builds of about 7 minutes each
+  for images that exist, and it stays the way out when they are gone.
+- All components from the branch, controller-manager and machinepoollet
+  as well. The lab changes what a rotation needs and nothing else.
+  machinepoollet needs a change that the branch does not have (decision
+  17).
+- A rotation started from inside the provider pod, as the check program
+  of decision 13 does. It shows that the header can be changed and skips
+  everything a user would touch.
+
+**What we accept.**
+- The two images belong to a fork of someone else. The tag
+  `key-rotation` moves when the branch moves, and the branch is marked as
+  not to be merged, so it can be rewritten. The digests that the lab ran
+  are in the implementation note. Not tried: a digest in `lab.env` in
+  place of the tag.
+- The cluster runs mixed versions. The branch starts 32 commits after
+  v0.6.1, controller-manager stays at v0.6.1, and the manifests are the
+  ones ironcore-in-a-box names (TODO 2).
+- The provider has to be replaced first. Read in the code, not run: the
+  volumepoollet of the branch against a provider without the call fails
+  the update of every encrypted Volume.
+- The record of an image changes its form, and an older provider cannot
+  read it. Read in the code, not run: going back to an older provider
+  image needs every Volume deleted that the new one has written.
+- The provider reports the passphrase of the header in plain with every
+  list of volumes, because volumepoollet compares it with the Secret.
+- The call carries the wanted passphrase only. The enhancement proposal
+  for key rotation
+  ([IEP-24](https://github.com/ironcore-dev/enhancements/pull/62)) sends
+  the current one as well and reports a reference to the key, not the
+  key. The lab follows the branch.
+- Two errors repeat in the log of the provider without a rotation. An
+  encrypted image that was attached once is 16 MiB larger than its
+  Volume, and the size step refuses it as a shrink at every reconcile. A
+  Volume from before this provider has no passphrase listed until its
+  first rotation is asked for, and until then each reconcile of it stops
+  with an error in front of the size step.
+
+**Implementation.**
+- Provider: submodule `ceph-provider` at `463eacd`, branch
+  `luks-header-rotation-iri` of the fork. That is ceph-provider `main` of
+  2026-11-24 (`67212d3`) plus 13 commits: three for the packages of
+  decisions 14 and 15, four of the provider branch named above (the
+  handler and the list of passphrases in the record), and six that join
+  them.
+  Its `go.mod` takes ironcore from the branch with a `replace` line.
+- `lab.env.example` has the settings of a rotation run: the build tag of
+  decision 13, the two images of the branch, and the machinepoollet image
+  of decision 17.
+- `images/ceph-volume-provider/Dockerfile` installs `cryptsetup-devel`,
+  see the note at decision 14.
+
+Run on 2026-11-25 on the Linux test host, with the second build under
+test. The provider of the first run was built without the order fix
+(`ea4182f`), the provider of the others from the tree of the pin. The
+images of the branch were
+`ghcr.io/gonzolino/ironcore-apiserver@sha256:cf0295685573676c90921625c079ab63011a7611d18079228b04721eb14b934c`
+and
+`ghcr.io/gonzolino/ironcore-volumepoollet@sha256:443011da7245516881c9ed021e19c9024390fcdc93d52bda4cb41fbd0202ba01`.
+
+- A Volume that no VM uses, 1 GiB, pointed at a second Secret.
+  volumepoollet called the provider once. The provider logged "Updated
+  encryption header" 9 s and 16 s after the patch. Afterwards the header
+  had one keyslot, with argon2id, 64 MiB, 4 iterations and 4 threads,
+  the new Secret opened it and the old one did not (`rbd encryption
+  luksOpen --test-passphrase`).
+- The same Volume with its image grown by 16 MiB, as an attached image
+  is, and pointed back at the first Secret. Without the order fix the
+  rotation did not start, in 17 reconciles over 5.5 minutes. With the
+  pin both header steps ran, and the first Secret opened the header
+  again.
+- A Volume attached to the running VM. The header steps came 9 s and
+  16 s after the patch, the VM kept running, and the header had the new
+  passphrase only. What the machine side did meanwhile is decision 17.
+- Volumes that an older provider had created stayed `Available` after
+  the swap.
+
+Not run: a rotation while the guest writes to the disk, a cold start of
+the VM after a rotation, the provider at a memory limit below 2Gi, and
+the two cases marked "not run" above.
 
 ## TODO
 
@@ -1014,3 +1321,36 @@ Deferred work and open questions. Numbers stay.
     test, and how long its test cluster takes under emulation. Until then
     the test of decision 13 runs against a local build of the same
     commit.
+
+17. **A keyslot removal that stops half way leaves the key material in the
+    image.** The commit of the header session writes the changed ranges
+    lowest offset first and does not take a written range back when a
+    later one fails. For a removal that puts the two copies of the
+    metadata before the wipe of the key material. Tested on 2026-11-25
+    with librbd of commit `2fd833e9b5e`, go-ceph `128f391` and
+    ceph-provider `a6b2cbb`. The commit was stopped after its first or
+    its second range, by a kill of the process and by a blocklist of the
+    client, four rounds in all.
+
+    Example. A rotation removes keyslot 0, and the commit stops after the
+    two copies of the metadata. The header no longer lists keyslot 0, so
+    the old passphrase opens nothing and the removal looks done. A second
+    call of `luksheader.Rotate` finds no keyslot for the old passphrase
+    and returns without error. The 258048 bytes of key material of
+    keyslot 0 are still in the image. Behind the 32 KiB of metadata from
+    before the rotation they open with the old passphrase, in 4 of 4
+    rounds. After a full commit the same check opens nothing.
+
+    The add side held in the same test. A stopped add leaves the old
+    keyslot whole (4 of 4 rounds), and the header keeps one keyslot that
+    no passphrase opens.
+
+    Open, deferred by David on 2026-11-25: "We work on this after the
+    changes are approved." libcryptsetup writes the key material first
+    and the metadata last, for a removal
+    ([`luks2_keyslot.c:707`, `:730`](https://gitlab.com/cryptsetup/cryptsetup/-/blob/ff3f1723e0e65003e35b82094642b0f0a3583ddb/lib/luks2/luks2_keyslot.c#L707-L730))
+    and for an add
+    ([`luks2_keyslot_luks2.c:585`, `:589`](https://gitlab.com/cryptsetup/cryptsetup/-/blob/ff3f1723e0e65003e35b82094642b0f0a3583ddb/lib/luks2/luks2_keyslot_luks2.c#L585-L589)).
+    The same order in the commit of the session would turn a stopped
+    removal into a wiped keyslot that is still listed, and a stopped add
+    into no change. Not built, not tested.

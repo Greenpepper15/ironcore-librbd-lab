@@ -143,10 +143,10 @@ Both submodules point at forks, not at the upstream repositories. Their
 URLs are in `.gitmodules`. A prototype is a branch on a fork and a new pin
 here.
 
-| Submodule | Fork of | Pinned at | Behind upstream on 2026-11-23 |
+| Submodule | Fork of | Pinned at | Behind upstream on 2026-11-26 |
 |---|---|---|---|
-| `ceph-provider` | [ceph-provider](https://github.com/ironcore-dev/ceph-provider) | `8f93bdc`, which is `4c61421` (v0.7.0 plus 3 commits) plus one commit of the lab | 21 commits |
-| `go-ceph` | [go-ceph](https://github.com/ceph/go-ceph) | `e0f6508`, which is `e7e4b0b` (v0.41.0) plus one commit of the lab | 77 commits |
+| `ceph-provider` | [ceph-provider](https://github.com/ironcore-dev/ceph-provider) | `463eacd`, which is `main` of 2026-11-24 (`67212d3`) plus 13 commits for the rotation | 0 commits |
+| `go-ceph` | [go-ceph](https://github.com/ceph/go-ceph) | `128f391`, which is `e7e4b0b` (v0.41.0) plus two commits of the lab | 77 commits |
 
 Nothing keeps a fork or a pin in step with upstream. They fall behind
 unless someone moves them, and a fix that upstream made after the pin is

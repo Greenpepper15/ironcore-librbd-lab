@@ -84,7 +84,11 @@ func run(command, image string) error {
 		return fmt.Errorf("open header session: %w", err)
 	}
 	defer func() { _ = hdr.Close() }()
-	dev, err := cryptsetup.Open(fmt.Sprintf("/proc/self/fd/%d", hdr.Fd()))
+	path, err := hdr.Path()
+	if err != nil {
+		return err
+	}
+	dev, err := cryptsetup.Open(path)
 	if err != nil {
 		return err
 	}

@@ -22,8 +22,9 @@
 | What | Where |
 |---|---|
 | ironcore-in-a-box | submodule `ironcore-in-a-box`, pinned at `8263add` |
-| ceph-provider source | submodule `ceph-provider`, a fork of ceph-provider, pinned at `8f93bdc` (`4c61421`, which is v0.7.0 plus 3 commits, plus the package of decision 14), decision 11 |
-| go-ceph source | submodule `go-ceph`, a fork of go-ceph, pinned at `e0f6508` (v0.41.0 plus the binding of decision 13), decision 12 |
+| ceph-provider source | submodule `ceph-provider`, a fork of ceph-provider, pinned at `463eacd` (`main` of 2026-11-24 plus 13 commits for the rotation), decisions 11 and 16 |
+| go-ceph source | submodule `go-ceph`, a fork of go-ceph, pinned at `128f391` (v0.41.0 plus the binding of decisions 13 and 15), decision 12 |
+| IronCore side of a rotation | images `ironcore-apiserver` and `ironcore-volumepoollet` of the branch that decision 16 names |
 | IronCore components | [ironcore](https://github.com/ironcore-dev/ironcore), [ceph-provider](https://github.com/ironcore-dev/ceph-provider), [libvirt-provider](https://github.com/ironcore-dev/libvirt-provider); local checkouts are named in `lab.env` |
 | Ceph image recipes of Clyso's build system | [cbs-components](https://github.com/clyso/cbs-components) |
 | Stand-in for the build under test | `quay.io/ceph/ceph:v21.2.0`, RPMs at `https://download.ceph.com/rpm-21.2.0/el10` |

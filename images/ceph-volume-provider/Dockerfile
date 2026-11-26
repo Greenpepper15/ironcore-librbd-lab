@@ -34,8 +34,10 @@ $gpg
 REPO
 librbd=$(rpm -q --qf '%{VERSION}-%{RELEASE}' librbd1)
 librados=$(rpm -q --qf '%{VERSION}-%{RELEASE}' librados2)
-dnf install -y --repo lab-ceph-devel --repo baseos --repo appstream \
-    gcc "librbd-devel-$librbd" "librados-devel-$librados"
+# cryptsetup-devel is for the provider's libcryptsetup package, which is built
+# only with the tag ceph_luks_header_session. It comes from the CRB repository.
+dnf install -y --repo lab-ceph-devel --repo baseos --repo appstream --repo crb \
+    gcc "librbd-devel-$librbd" "librados-devel-$librados" cryptsetup-devel
 dnf clean all
 EOF
 
